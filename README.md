@@ -9,7 +9,7 @@
 | 组件 | 类型 | 安装方式 | 说明 |
 |------|------|----------|------|
 | **`wap_plugin/`** | WAuxiliary 插件 | 手动下载安装 | 拦截微信消息并转发到服务器 |
-| **`openclaw_plugin/`** | OpenClaw Channel | `npm install` | 接收消息并调用 OpenClaw AI |
+| **`openclaw_plugin/`** | OpenClaw Channel | `openclaw plugins install` | 接收消息并调用 OpenClaw AI |
 
 ## 🚀 快速开始
 
@@ -45,10 +45,11 @@ openclaw plugins install openclaw-wap-channel
 **详细配置说明**：
 - 服务端：查看 [`openclaw_plugin/README.md`](./openclaw_plugin/README.md)
 - 客户端：查看 [`wap_plugin/README.md`](./wap_plugin/README.md)
+- 架构说明：查看 [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 
 ## 📡 通信协议
 
-两个组件通过 WebSocket 通信，协议详见各自目录的 README。
+两个组件通过 WebSocket 通信，协议详见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ## 🔒 安全特性
 
