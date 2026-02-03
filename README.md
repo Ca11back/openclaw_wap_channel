@@ -1,6 +1,6 @@
 # OpenClaw WAP Channel
 
-通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的完整解决方案。
+通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的~~完整~~解决方案(目前仅支持文字消息)。
 
 ## 📦 组件说明
 
