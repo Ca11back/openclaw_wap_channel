@@ -1,0 +1,523 @@
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONArray;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Arrays;
+import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.Collections;
+
+// ============================================================
+// 配置区域 - 请根据实际情况修改
+// ============================================================
+
+// 服务器 WebSocket 地址
+String SERVER_URL = "ws(s)://xxx.xxx.xxx:xxx/ws";
+
+// 认证 Token（与服务端 WAP_AUTH_TOKEN 保持一致）
+String AUTH_TOKEN = "xxx";
+
+// 白名单（从服务端动态下发，不再本地配置）
+Set WHITELIST = Collections.synchronizedSet(new HashSet());
+boolean configReceived = false;  // 是否已收到服务端配置
+
+// 是否只转发私聊消息（false 表示同时转发群聊消息）
+boolean PRIVATE_ONLY = true;
+
+// 心跳间隔（毫秒）
+long HEARTBEAT_INTERVAL = 20000;
+
+// 心跳容错配置
+int MAX_MISSED_HEARTBEATS = 2;  // 连续 N 次心跳失败才视为断联（容忍 40 秒网络波动）
+
+// 【安全】发送速率限制（每分钟最多发送的消息数）
+int SEND_RATE_LIMIT = 30;
+
+// 重连延迟配置（毫秒）
+long RECONNECT_DELAY_FIRST = 0;        // 第一次断开后立即重试
+long RECONNECT_DELAY_SECOND = 30000;   // 第二次重试延迟 30 秒
+long RECONNECT_DELAY_DEFAULT = 60000;  // 之后每次间隔 1 分钟
+
+// 消息重试配置
+int MAX_SEND_RETRIES = 3;              // 最大重试次数
+long RETRY_DELAY_MS = 2000;            // 重试间隔（毫秒）
+int MAX_PENDING_MESSAGES = 5;          // 最大待发送队列长度
+long MESSAGE_TTL_MS = 30000;           // 消息过期时间（30秒），超过则丢弃
+
+// ============================================================
+// 运行时变量（请勿修改）
+// ============================================================
+
+OkHttpClient client = null;
+WebSocket webSocket = null;
+Thread heartbeatThread = null;
+Thread retrySenderThread = null;
+boolean isConnected = false;
+boolean shouldReconnect = true;
+int reconnectAttempt = 0;
+int missedHeartbeats = 0;       // 连续未收到 pong 的次数
+boolean awaitingPong = false;   // 是否正在等待 pong 响应
+
+// 【安全】速率限制计数器
+long sendRateLimitWindowStart = 0;
+int sendCountInWindow = 0;
+
+// 消息重试队列
+ConcurrentLinkedQueue pendingMessages = new ConcurrentLinkedQueue();
+
+// ============================================================
+// 生命周期方法
+// ============================================================
+
+void onLoad() {
+    log("Moltbot 消息桥接器加载中...");
+    // 【安全】不要在日志中显示完整 URL，可能包含敏感信息
+    log("服务器地址: " + maskUrl(SERVER_URL));
+    log("白名单将从服务端下发");
+    initWebSocketClient();
+    connectToServer();
+}
+
+void onUnLoad() {
+    log("Moltbot 消息桥接器卸载中...");
+    shouldReconnect = false;
+
+    if (heartbeatThread != null) {
+        heartbeatThread.interrupt();
+        heartbeatThread = null;
+    }
+
+    if (retrySenderThread != null) {
+        retrySenderThread.interrupt();
+        retrySenderThread = null;
+    }
+
+    // 清理待发送队列
+    int dropped = pendingMessages.size();
+    pendingMessages.clear();
+    if (dropped > 0) {
+        log("丢弃 " + dropped + " 条待发送消息");
+    }
+
+    if (webSocket != null) {
+        webSocket.close(1000, "Plugin unloading");
+        webSocket = null;
+    }
+
+    isConnected = false;
+    log("Moltbot 消息桥接器已卸载");
+}
+
+// 【安全】URL 脱敏
+String maskUrl(String url) {
+    if (url == null) return "null";
+    // 只显示协议和主机名，隐藏路径和参数
+    int schemeEnd = url.indexOf("://");
+    if (schemeEnd < 0) return "***";
+    int hostEnd = url.indexOf("/", schemeEnd + 3);
+    if (hostEnd < 0) hostEnd = url.indexOf("?", schemeEnd + 3);
+    if (hostEnd < 0) hostEnd = url.length();
+    return url.substring(0, hostEnd) + "/***";
+}
+
+// ============================================================
+// WebSocket 连接管理
+// ============================================================
+
+void initWebSocketClient() {
+    // 注意：不使用 pingInterval，因为 OkHttp 单次 ping 超时就会断联
+    // 我们使用自定义心跳机制，支持连续多次失败才断联
+    client = new OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build();
+}
+
+void connectToServer() {
+    if (webSocket != null) {
+        return;
+    }
+
+    log("正在连接服务器...");
+
+    Request request = new Request.Builder()
+        .url(SERVER_URL)
+        .addHeader("Authorization", "Bearer " + AUTH_TOKEN)
+        .build();
+
+    webSocket = client.newWebSocket(request, new WebSocketListener() {
+        public void onOpen(WebSocket ws, Response response) {
+            log("WebSocket 连接成功，等待服务端下发配置...");
+            isConnected = true;
+            reconnectAttempt = 0;
+            missedHeartbeats = 0;
+            awaitingPong = false;
+            configReceived = false;  // 重置配置状态
+            WHITELIST.clear();       // 清空旧白名单
+            startHeartbeat();
+            startRetrySender();
+        }
+
+        public void onMessage(WebSocket ws, String text) {
+            handleServerMessage(text);
+        }
+
+        public void onClosing(WebSocket ws, int code, String reason) {
+            log("WebSocket 正在关闭: " + reason);
+            isConnected = false;
+        }
+
+        public void onClosed(WebSocket ws, int code, String reason) {
+            log("WebSocket 已关闭: " + reason);
+            isConnected = false;
+            webSocket = null;
+            scheduleReconnect();
+        }
+
+        public void onFailure(WebSocket ws, Throwable t, Response response) {
+            log("WebSocket 连接失败: " + t.getMessage());
+            isConnected = false;
+            webSocket = null;
+            scheduleReconnect();
+        }
+    });
+}
+
+void scheduleReconnect() {
+    if (!shouldReconnect) {
+        return;
+    }
+
+    reconnectAttempt++;
+
+    // 计算延迟时间
+    long delay;
+    if (reconnectAttempt == 1) {
+        delay = RECONNECT_DELAY_FIRST;
+    } else if (reconnectAttempt == 2) {
+        delay = RECONNECT_DELAY_SECOND;
+    } else {
+        delay = RECONNECT_DELAY_DEFAULT;
+    }
+
+    log("将在 " + (delay / 1000) + " 秒后进行第 " + reconnectAttempt + " 次重连");
+
+    new Thread(new Runnable() {
+        public void run() {
+            try {
+                if (delay > 0) {
+                    Thread.sleep(delay);
+                }
+                if (shouldReconnect && webSocket == null) {
+                    connectToServer();
+                }
+            } catch (InterruptedException e) {
+                // 忽略中断
+            }
+        }
+    }).start();
+}
+
+void startHeartbeat() {
+    if (heartbeatThread != null) {
+        heartbeatThread.interrupt();
+    }
+
+    heartbeatThread = new Thread(new Runnable() {
+        public void run() {
+            while (isConnected && !Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(HEARTBEAT_INTERVAL);
+                    if (webSocket != null && isConnected) {
+                        // 检查上一次心跳是否收到了 pong
+                        if (awaitingPong) {
+                            // 上一次心跳没有收到响应
+                            missedHeartbeats++;
+                            log("心跳超时 (" + missedHeartbeats + "/" + MAX_MISSED_HEARTBEATS + ")");
+
+                            if (missedHeartbeats >= MAX_MISSED_HEARTBEATS) {
+                                // 连续多次心跳失败，视为断联
+                                log("连续 " + MAX_MISSED_HEARTBEATS + " 次心跳无响应，主动断开连接");
+                                isConnected = false;
+                                awaitingPong = false;
+                                webSocket.close(1000, "Heartbeat timeout");
+                                webSocket = null;
+                                scheduleReconnect();
+                                break;
+                            }
+                        }
+
+                        // 发送新的心跳
+                        awaitingPong = true;
+                        JSONObject heartbeat = new JSONObject();
+                        heartbeat.put("type", "heartbeat");
+                        webSocket.send(heartbeat.toString());
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    log("心跳发送失败: " + e.getMessage());
+                }
+            }
+        }
+    });
+    heartbeatThread.setDaemon(true);
+    heartbeatThread.start();
+}
+
+// ============================================================
+// 消息重试发送机制
+// ============================================================
+
+// 待发送消息封装
+class PendingMessage {
+    String payload;      // JSON 字符串
+    int retryCount;      // 已重试次数
+    long createdAt;      // 创建时间
+    String description;  // 用于日志的描述
+
+    PendingMessage(String payload, String description) {
+        this.payload = payload;
+        this.retryCount = 0;
+        this.createdAt = System.currentTimeMillis();
+        this.description = description;
+    }
+}
+
+void startRetrySender() {
+    if (retrySenderThread != null) {
+        retrySenderThread.interrupt();
+    }
+
+    retrySenderThread = new Thread(new Runnable() {
+        public void run() {
+            while (shouldReconnect && !Thread.currentThread().isInterrupted()) {
+                try {
+                    // 从队列取出待发送消息
+                    PendingMessage pending = (PendingMessage) pendingMessages.poll();
+                    if (pending == null) {
+                        // 队列空，等待一段时间
+                        Thread.sleep(500);
+                        continue;
+                    }
+
+                    // 检查消息是否过期
+                    long age = System.currentTimeMillis() - pending.createdAt;
+                    if (age > MESSAGE_TTL_MS) {
+                        log("消息已过期 (" + (age / 1000) + "s)，丢弃: " + pending.description);
+                        continue;  // 丢弃，处理下一条
+                    }
+
+                    // 检查连接状态
+                    if (webSocket == null || !isConnected) {
+                        // 连接断开，放回队列等待重连
+                        pendingMessages.offer(pending);
+                        Thread.sleep(1000);
+                        continue;
+                    }
+
+                    // 尝试发送
+                    boolean success = false;
+                    try {
+                        webSocket.send(pending.payload);
+                        success = true;
+                        log("消息发送成功: " + pending.description);
+                    } catch (Exception e) {
+                        log("消息发送失败: " + pending.description + " - " + e.getMessage());
+                    }
+
+                    if (!success) {
+                        pending.retryCount++;
+                        if (pending.retryCount < MAX_SEND_RETRIES) {
+                            log("消息入队重试 (" + pending.retryCount + "/" + MAX_SEND_RETRIES + "): " + pending.description);
+                            pendingMessages.offer(pending);
+                            Thread.sleep(RETRY_DELAY_MS);
+                        } else {
+                            log("消息重试次数已达上限，丢弃: " + pending.description);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        }
+    });
+    retrySenderThread.setDaemon(true);
+    retrySenderThread.start();
+}
+
+// 入队待发送消息
+boolean enqueueMessage(String payload, String description) {
+    if (pendingMessages.size() >= MAX_PENDING_MESSAGES) {
+        log("消息队列已满，丢弃新消息: " + description);
+        return false;
+    }
+    pendingMessages.offer(new PendingMessage(payload, description));
+    return true;
+}
+
+// ============================================================
+// 消息处理
+// ============================================================
+
+void onHandleMsg(Object msgInfoBean) {
+    // 过滤：自己发送的消息不转发
+    if (msgInfoBean.isSend()) {
+        return;
+    }
+
+    // 过滤：只处理私聊（如果配置了）
+    if (PRIVATE_ONLY && !msgInfoBean.isPrivateChat()) {
+        return;
+    }
+
+    // 暂只支持文本消息
+    if (!msgInfoBean.isText()) {
+        return;
+    }
+
+    // 检查是否已收到服务端配置
+    if (!configReceived) {
+        return;
+    }
+
+    String sender = msgInfoBean.getSendTalker();
+
+    // 入站白名单过滤（白名单由服务端下发）
+    if (WHITELIST.size() > 0 && !WHITELIST.contains(sender)) {
+        return;
+    }
+
+    // 构建消息 JSON
+    try {
+        JSONObject msg = new JSONObject();
+        msg.put("type", "message");
+
+        JSONObject data = new JSONObject();
+        data.put("msg_id", msgInfoBean.getMsgId());
+        data.put("msg_type", msgInfoBean.getType());
+        data.put("talker", msgInfoBean.getTalker());
+        data.put("sender", sender);
+        data.put("content", msgInfoBean.getContent());
+        data.put("timestamp", msgInfoBean.getCreateTime());
+        data.put("is_private", msgInfoBean.isPrivateChat());
+        data.put("is_group", msgInfoBean.isGroupChat());
+
+        msg.put("data", data);
+
+        // 通过队列发送，支持重试
+        String contentPreview = msgInfoBean.getContent();
+        if (contentPreview.length() > 30) {
+            contentPreview = contentPreview.substring(0, 30) + "...";
+        }
+        String description = sender + " -> " + contentPreview;
+
+        if (enqueueMessage(msg.toString(), description)) {
+            log("消息入队: " + description);
+        }
+    } catch (Exception e) {
+        log("消息处理失败: " + e.getMessage());
+    }
+}
+
+// ============================================================
+// 处理服务器指令
+// ============================================================
+
+void handleServerMessage(String text) {
+    try {
+        JSONObject msg = JSON.parseObject(text);
+        String type = msg.getString("type");
+
+        // 心跳响应
+        if ("pong".equals(type)) {
+            awaitingPong = false;
+            missedHeartbeats = 0;
+            return;
+        }
+
+        // 服务端下发配置（白名单等）
+        if ("config".equals(type)) {
+            JSONObject data = msg.getJSONObject("data");
+            if (data != null) {
+                JSONArray whitelist = data.getJSONArray("whitelist");
+                if (whitelist != null) {
+                    WHITELIST.clear();
+                    for (int i = 0; i < whitelist.size(); i++) {
+                        String wxid = whitelist.getString(i);
+                        if (wxid != null && !wxid.isEmpty()) {
+                            WHITELIST.add(wxid);
+                        }
+                    }
+                    configReceived = true;
+                    log("收到服务端配置，白名单: " + WHITELIST);
+                }
+            }
+            return;
+        }
+
+        // 发送文本消息
+        if ("send_text".equals(type)) {
+            JSONObject data = msg.getJSONObject("data");
+            String talker = data.getString("talker");
+            String content = data.getString("content");
+
+            if (talker == null || content == null) {
+                log("send_text 指令缺少必要参数");
+                return;
+            }
+
+            // 【安全】出站白名单验证（使用服务端下发的白名单）
+            if (WHITELIST.size() > 0 && !WHITELIST.contains(talker)) {
+                log("【安全】拒绝发送消息到非白名单用户: " + talker);
+                return;
+            }
+
+            // 【安全】速率限制
+            long now = System.currentTimeMillis();
+            if (now - sendRateLimitWindowStart > 60000) {
+                // 新的一分钟窗口
+                sendRateLimitWindowStart = now;
+                sendCountInWindow = 0;
+            }
+            sendCountInWindow++;
+            if (sendCountInWindow > SEND_RATE_LIMIT) {
+                log("【安全】发送速率超限，本分钟已发送 " + sendCountInWindow + " 条消息");
+                return;
+            }
+
+            sendText(talker, content);
+            String preview = content;
+            if (preview.length() > 50) {
+                preview = preview.substring(0, 50) + "...";
+            }
+            log("已发送消息到 " + talker + ": " + preview);
+            return;
+        }
+
+        // 预留：发送图片消息
+        if ("send_image".equals(type)) {
+            log("图片消息暂不支持，请等待后续版本");
+            return;
+        }
+
+        // 预留：发送语音消息
+        if ("send_voice".equals(type)) {
+            log("语音消息暂不支持，请等待后续版本");
+            return;
+        }
+
+        log("收到未知指令: " + type);
+    } catch (Exception e) {
+        log("解析服务器消息失败: " + e.getMessage());
+    }
+}
+

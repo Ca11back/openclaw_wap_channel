@@ -1,0 +1,11 @@
+{
+    "id": "wap",
+    "channels": [
+        "wap"
+    ],
+    "configSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+    }
+}
