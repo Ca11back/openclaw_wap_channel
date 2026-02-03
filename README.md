@@ -1,6 +1,6 @@
 # OpenClaw WAP Channel
 
-通过 WebSocket 将微信消息桥接到 OpenClaw AI 助手的完整解决方案。
+通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的完整解决方案。
 
 ## 📦 组件说明
 
@@ -16,14 +16,7 @@
 ### 1️⃣ 安装服务端（OpenClaw Channel）
 
 ```bash
-# 方式一：npm 全局安装
-npm install -g openclaw-wap-channel
-
-# 方式二：在 OpenClaw 配置中添加
-# 编辑 ~/.openclaw/openclaw.json
-{
-  "extensions": ["openclaw-wap-channel"]
-}
+openclaw plugins install openclaw-wap-channel
 ```
 
 配置服务端（编辑 `~/.openclaw/openclaw.json`）：
