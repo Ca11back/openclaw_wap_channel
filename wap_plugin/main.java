@@ -277,19 +277,14 @@ void startHeartbeat() {
 // 消息重试发送机制
 // ============================================================
 
-// 待发送消息封装
-class PendingMessage {
-    String payload;      // JSON 字符串
-    int retryCount;      // 已重试次数
-    long createdAt;      // 创建时间
-    String description;  // 用于日志的描述
-
-    PendingMessage(String payload, String description) {
-        this.payload = payload;
-        this.retryCount = 0;
-        this.createdAt = System.currentTimeMillis();
-        this.description = description;
-    }
+// 待发送消息封装（使用 Map 代替类以兼容 BeanShell）
+java.util.HashMap createPendingMessage(String payload, String description) {
+    java.util.HashMap msg = new java.util.HashMap();
+    msg.put("payload", payload);
+    msg.put("retryCount", 0);
+    msg.put("createdAt", System.currentTimeMillis());
+    msg.put("description", description);
+    return msg;
 }
 
 void startRetrySender() {
@@ -302,7 +297,7 @@ void startRetrySender() {
             while (shouldReconnect && !Thread.currentThread().isInterrupted()) {
                 try {
                     // 从队列取出待发送消息
-                    PendingMessage pending = (PendingMessage) pendingMessages.poll();
+                    java.util.HashMap pending = (java.util.HashMap) pendingMessages.poll();
                     if (pending == null) {
                         // 队列空，等待一段时间
                         Thread.sleep(500);
@@ -310,9 +305,11 @@ void startRetrySender() {
                     }
 
                     // 检查消息是否过期
-                    long age = System.currentTimeMillis() - pending.createdAt;
+                    long createdAt = ((Long) pending.get("createdAt")).longValue();
+                    long age = System.currentTimeMillis() - createdAt;
                     if (age > MESSAGE_TTL_MS) {
-                        log("消息已过期 (" + (age / 1000) + "s)，丢弃: " + pending.description);
+                        String description = (String) pending.get("description");
+                        log("消息已过期 (" + (age / 1000) + "s)，丢弃: " + description);
                         continue;  // 丢弃，处理下一条
                     }
 
@@ -326,22 +323,26 @@ void startRetrySender() {
 
                     // 尝试发送
                     boolean success = false;
+                    String payload = (String) pending.get("payload");
+                    String description = (String) pending.get("description");
                     try {
-                        webSocket.send(pending.payload);
+                        webSocket.send(payload);
                         success = true;
-                        log("消息发送成功: " + pending.description);
+                        log("消息发送成功: " + description);
                     } catch (Exception e) {
-                        log("消息发送失败: " + pending.description + " - " + e.getMessage());
+                        log("消息发送失败: " + description + " - " + e.getMessage());
                     }
 
                     if (!success) {
-                        pending.retryCount++;
-                        if (pending.retryCount < MAX_SEND_RETRIES) {
-                            log("消息入队重试 (" + pending.retryCount + "/" + MAX_SEND_RETRIES + "): " + pending.description);
+                        int retryCount = ((Integer) pending.get("retryCount")).intValue();
+                        retryCount++;
+                        pending.put("retryCount", retryCount);
+                        if (retryCount < MAX_SEND_RETRIES) {
+                            log("消息入队重试 (" + retryCount + "/" + MAX_SEND_RETRIES + "): " + description);
                             pendingMessages.offer(pending);
                             Thread.sleep(RETRY_DELAY_MS);
                         } else {
-                            log("消息重试次数已达上限，丢弃: " + pending.description);
+                            log("消息重试次数已达上限，丢弃: " + description);
                         }
                     }
                 } catch (InterruptedException e) {
@@ -360,7 +361,7 @@ boolean enqueueMessage(String payload, String description) {
         log("消息队列已满，丢弃新消息: " + description);
         return false;
     }
-    pendingMessages.offer(new PendingMessage(payload, description));
+    pendingMessages.offer(createPendingMessage(payload, description));
     return true;
 }
 
