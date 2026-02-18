@@ -4,7 +4,7 @@ import { wapPlugin } from "./src/channel.js";
 import { startWsService, stopWsService, setWapRuntime } from "./src/ws-server.js";
 
 const plugin = {
-    id: "wap",
+    id: "openclaw-channel-wap",
     name: "WeChat (WAP)",
     description: "WeChat channel via WAuxiliary plugin",
     configSchema: emptyPluginConfigSchema(),

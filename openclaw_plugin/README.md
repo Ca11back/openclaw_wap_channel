@@ -11,7 +11,7 @@ OpenClaw AI 助手的微信消息通道插件，接收来自 WAuxiliary 插件�
 ## 📦 安装
 
 ```bash
-openclaw plugins install openclaw-wap-channel
+openclaw plugins install openclaw-channel-wap
 ```
 
 ## ⚙️ 配置
@@ -21,7 +21,7 @@ openclaw plugins install openclaw-wap-channel
 ```json
 {
   "channels": {
-    "wap": {
+    "openclaw-channel-wap": {
       "enabled": true,
       "port": 8765,
       "authToken": "your-secret-token-here",

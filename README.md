@@ -16,7 +16,7 @@
 ### 1️⃣ 安装服务端（OpenClaw Channel）
 
 ```bash
-openclaw plugins install openclaw-wap-channel
+openclaw plugins install openclaw-channel-wap
 ```
 
 配置服务端（编辑 `~/.openclaw/openclaw.json`）：
@@ -24,7 +24,7 @@ openclaw plugins install openclaw-wap-channel
 ```json
 {
   "channels": {
-    "wap": {
+    "openclaw-channel-wap": {
       "enabled": true,
       "port": 8765,
       "authToken": "your-secret-token-32chars",

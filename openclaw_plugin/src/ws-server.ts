@@ -42,7 +42,7 @@ export function startWsService(api: OpenClawPluginApi) {
     // 调试：输出完整配置
     api.logger.debug(`WAP channels config: ${JSON.stringify(api.config.channels)}`);
 
-    const wapConfig = api.config.channels?.wap as
+    const wapConfig = (api.config.channels as Record<string, unknown>)?.["openclaw-channel-wap"] as
         | { port?: number; authToken?: string; whitelist?: string[] }
         | undefined;
 
@@ -55,7 +55,7 @@ export function startWsService(api: OpenClawPluginApi) {
     if (!authToken) {
         api.logger.error(
             "WAP WebSocket server NOT started: authToken is required. " +
-            "Set WAP_AUTH_TOKEN env or channels.wap.authToken in config."
+            "Set WAP_AUTH_TOKEN env or channels.openclaw-channel-wap.authToken in config."
         );
         return;
     }
@@ -221,7 +221,7 @@ async function processWapInboundMessage(
     // 解析路由
     const route = core.channel.routing.resolveAgentRoute({
         cfg,
-        channel: "wap",
+        channel: "openclaw-channel-wap",
         accountId,
         peer: {
             kind,
@@ -236,7 +236,7 @@ async function processWapInboundMessage(
 
     // 记录 channel activity
     core.channel.activity.record({
-        channel: "wap",
+        channel: "openclaw-channel-wap",
         accountId,
         direction: "inbound",
     });
@@ -261,7 +261,7 @@ async function processWapInboundMessage(
         Body: body,
         RawBody: bodyText,
         CommandBody: bodyText,
-        From: kind === "dm" ? `wap:${msgData.sender}` : `wap:group:${msgData.talker}`,
+        From: kind === "dm" ? `openclaw-channel-wap:${msgData.sender}` : `openclaw-channel-wap:group:${msgData.talker}`,
         To: msgData.talker,
         SessionKey: sessionKey,
         AccountId: route.accountId,
@@ -270,18 +270,18 @@ async function processWapInboundMessage(
         GroupSubject: kind !== "dm" ? msgData.talker : undefined,
         SenderName: msgData.sender,
         SenderId: msgData.sender,
-        Provider: "wap" as const,
-        Surface: "wap" as const,
+        Provider: "openclaw-channel-wap" as const,
+        Surface: "openclaw-channel-wap" as const,
         MessageSid: String(msgData.msg_id),
         Timestamp: msgData.timestamp,
         WasMentioned: undefined,
         CommandAuthorized: true, // WAP 默认授权（已通过 token 认证）
-        OriginatingChannel: "wap" as const,
+        OriginatingChannel: "openclaw-channel-wap" as const,
         OriginatingTo: msgData.talker,
     });
 
     // 获取文本分块限制
-    const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "wap", accountId, {
+    const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "openclaw-channel-wap", accountId, {
         fallbackLimit: 4000,
     });
 
@@ -294,7 +294,7 @@ async function processWapInboundMessage(
                 if (!replyText) return;
 
                 // 分块发送
-                const chunkMode = core.channel.text.resolveChunkMode(cfg, "wap", accountId);
+                const chunkMode = core.channel.text.resolveChunkMode(cfg, "openclaw-channel-wap", accountId);
                 const chunks = core.channel.text.chunkMarkdownTextWithMode(replyText, textLimit, chunkMode);
 
                 for (const chunk of chunks.length > 0 ? chunks : [replyText]) {

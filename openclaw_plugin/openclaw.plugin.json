@@ -1,7 +1,7 @@
 {
-    "id": "wap",
+    "id": "openclaw-channel-wap",
     "channels": [
-        "wap"
+        "openclaw-channel-wap"
     ],
     "configSchema": {
         "type": "object",

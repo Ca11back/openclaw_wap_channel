@@ -58,13 +58,13 @@ const WapConfigSchema = {
 // ============================================================
 
 export const wapPlugin: ChannelPlugin<WapAccount> = {
-    id: "wap",
+    id: "openclaw-channel-wap",
 
     meta: {
-        id: "wap",
+        id: "openclaw-channel-wap",
         label: "WeChat (WAP)",
         selectionLabel: "WeChat via WAuxiliary",
-        docsPath: "/channels/wap",
+        docsPath: "/channels/openclaw-channel-wap",
         blurb: "WeChat messaging via WAuxiliary Android plugin.",
         aliases: ["wechat", "wx"],
     },
@@ -78,14 +78,14 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     },
 
     // 配置变更时触发重载
-    reload: { configPrefixes: ["channels.wap"] },
+    reload: { configPrefixes: ["channels.openclaw-channel-wap"] },
 
     // 配置 Schema
     configSchema: WapConfigSchema,
 
     config: {
         listAccountIds: (cfg) => {
-            const wapCfg = cfg.channels?.wap as { accounts?: Record<string, unknown> } | undefined;
+            const wapCfg = (cfg.channels as Record<string, unknown>)?.["openclaw-channel-wap"] as { accounts?: Record<string, unknown> } | undefined;
             const accounts = wapCfg?.accounts;
             if (accounts && Object.keys(accounts).length > 0) {
                 return Object.keys(accounts);
@@ -95,7 +95,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
 
         resolveAccount: (cfg, accountId) => {
             const id = accountId ?? "default";
-            const wapCfg = cfg.channels?.wap as
+            const wapCfg = (cfg.channels as Record<string, unknown>)?.["openclaw-channel-wap"] as
                 | { accounts?: Record<string, WapAccountConfig> }
                 | undefined;
             const accountCfg = wapCfg?.accounts?.[id] ?? {};
@@ -126,8 +126,8 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
         resolveDmPolicy: ({ account }) => ({
             policy: account.config.dmPolicy ?? ("open" as const),
             allowFrom: account.config.allowFrom ?? [],
-            policyPath: `channels.wap.accounts.${account.accountId}.dmPolicy`,
-            allowFromPath: `channels.wap.accounts.${account.accountId}.allowFrom`,
+            policyPath: `channels.openclaw-channel-wap.accounts.${account.accountId}.dmPolicy`,
+            allowFromPath: `channels.openclaw-channel-wap.accounts.${account.accountId}.allowFrom`,
         }),
     },
 
@@ -154,12 +154,12 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
                 return {
                     ok: false,
                     error: "No connected WAP clients",
-                    channel: "wap",
+                    channel: "openclaw-channel-wap",
                 };
             }
 
             runtime?.logger.debug(`WAP sendText to ${to}: ${text.substring(0, 50)}...`);
-            return { ok: true, channel: "wap" };
+            return { ok: true, channel: "openclaw-channel-wap" };
         },
     },
 
