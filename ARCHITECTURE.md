@@ -48,7 +48,7 @@
 ## 📦 目录结构
 
 ```
-openclaw_wap_channel/
+openclaw-channel-wap/
 ├── README.md                    # 总体说明
 ├── LICENSE                      # MIT 许可证
 ├── .gitignore                   # Git 忽略配置

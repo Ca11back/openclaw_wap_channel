@@ -4,7 +4,7 @@ OpenClaw AI 助手的微信消息通道插件，接收来自 WAuxiliary 插件�
 
 > ⚠️ **重要提示**  
 > 本插件需要配合 **WAuxiliary 微信插件**一起使用才能工作。  
-> 📦 **完整使用说明**请查看：[https://github.com/Ca11back/openclaw_wap_channel](https://github.com/Ca11back/openclaw_wap_channel)
+> 📦 **完整使用说明**请查看：[https://github.com/Ca11back/openclaw-channel-wap](https://github.com/Ca11back/openclaw-channel-wap)
 
 ---
 
