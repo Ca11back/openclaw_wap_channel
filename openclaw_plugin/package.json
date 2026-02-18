@@ -13,11 +13,11 @@
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Ca11back/openclaw_wap_channel.git"
+        "url": "git+https://github.com/Ca11back/openclaw-channel-wap.git"
     },
-    "homepage": "https://github.com/Ca11back/openclaw_wap_channel#readme",
+    "homepage": "https://github.com/Ca11back/openclaw-channel-wap#readme",
     "bugs": {
-        "url": "https://github.com/Ca11back/openclaw_wap_channel/issues"
+        "url": "https://github.com/Ca11back/openclaw-channel-wap/issues"
     },
     "files": [
         "index.ts",
