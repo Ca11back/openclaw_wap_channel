@@ -4,7 +4,10 @@ import {
   DEFAULT_ACCOUNT_ID,
   hasExplicitAccount,
   listWapAccountIds,
+  looksLikeWapTargetId,
+  normalizeWapMessagingTarget,
   resolveAllowFrom,
+  resolveWapOutboundTarget,
   resolveWapAccount,
   type WapAccount,
   wapChannelConfigSchema,
@@ -35,7 +38,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
   },
   pairing: {
     idLabel: "wxid",
-    normalizeAllowEntry: (entry) => entry.trim(),
+    normalizeAllowEntry: normalizeWapMessagingTarget,
   },
   capabilities: {
     chatTypes: ["direct", "group"],
@@ -86,16 +89,30 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       return account.config.requireMentionInGroup ?? true;
     },
   },
+  messaging: {
+    normalizeTarget: normalizeWapMessagingTarget,
+    targetResolver: {
+      looksLikeId: looksLikeWapTargetId,
+      hint: "<wxid|chatroom_talker>",
+    },
+  },
   outbound: {
     deliveryMode: "direct",
     textChunkLimit: 4000,
+    resolveTarget: ({ to, allowFrom, mode }) =>
+      resolveWapOutboundTarget({
+        to,
+        allowFrom,
+        mode,
+      }),
     sendText: async ({ to, text, accountId }) => {
       const runtime = getWapRuntime();
       const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
+      const normalizedTarget = normalizeWapMessagingTarget(to);
       const sent = sendToClient(
         {
           type: "send_text",
-          data: { talker: to, content: text },
+          data: { talker: normalizedTarget, content: text },
         },
         effectiveAccountId,
       );
@@ -109,7 +126,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
           channel: CHANNEL_ID,
         };
       }
-      runtime?.logger.debug(`WAP sendText to ${to}: ${text.substring(0, 50)}...`);
+      runtime?.logger.debug(`WAP sendText to ${normalizedTarget}: ${text.substring(0, 50)}...`);
       return { ok: true, channel: CHANNEL_ID };
     },
   },

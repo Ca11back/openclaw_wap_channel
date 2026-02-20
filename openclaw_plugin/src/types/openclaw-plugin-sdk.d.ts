@@ -64,9 +64,23 @@ declare module "openclaw/plugin-sdk" {
         groupId?: string | null;
       }) => boolean | undefined;
     };
+    messaging?: {
+      normalizeTarget?: (target: string) => string;
+      targetResolver?: {
+        looksLikeId?: (target: string) => boolean;
+        hint?: string;
+      };
+    };
     outbound?: {
       deliveryMode: "direct" | "gateway" | "hybrid";
       textChunkLimit?: number;
+      resolveTarget?: (ctx: {
+        cfg?: OpenClawConfig;
+        to?: string;
+        allowFrom?: string[];
+        accountId?: string | null;
+        mode?: "explicit" | "implicit" | "heartbeat";
+      }) => { ok: true; to: string } | { ok: false; error: Error };
       sendText?: (ctx: {
         cfg: OpenClawConfig;
         to: string;

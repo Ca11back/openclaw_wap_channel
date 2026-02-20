@@ -106,6 +106,52 @@ export function normalizeSenderId(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
+export function normalizeWapMessagingTarget(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.replace(/^(wechat|wx|wap):/i, "").trim();
+}
+
+export function looksLikeWapTargetId(raw: string): boolean {
+  const normalized = normalizeWapMessagingTarget(raw);
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.endsWith("@chatroom")) {
+    return true;
+  }
+  return /^wxid_[A-Za-z0-9_-]+$/.test(normalized) || /^[A-Za-z][A-Za-z0-9._-]{2,}$/.test(normalized);
+}
+
+export function resolveWapOutboundTarget(params: {
+  to?: string;
+  allowFrom?: string[];
+  mode?: "explicit" | "implicit" | "heartbeat";
+}): { ok: true; to: string } | { ok: false; error: Error } {
+  const mode = params.mode ?? "explicit";
+  const explicitTarget = params.to ? normalizeWapMessagingTarget(params.to) : "";
+  if (explicitTarget) {
+    return { ok: true, to: explicitTarget };
+  }
+
+  const normalizedAllowFrom = (params.allowFrom ?? [])
+    .map((entry) => normalizeWapMessagingTarget(String(entry)))
+    .filter((entry): entry is string => Boolean(entry));
+  const fallbackTarget = normalizedAllowFrom[0];
+  if (mode !== "explicit" && fallbackTarget) {
+    return { ok: true, to: fallbackTarget };
+  }
+
+  return {
+    ok: false,
+    error: new Error(
+      `Missing WeChat target. Provide a target like ${mode === "explicit" ? "--to <wxid|chatroom_talker>" : "wxid/chatroom_talker"}.`,
+    ),
+  };
+}
+
 export function isSenderAllowed(senderId: string, allowFrom: string[]): boolean {
   if (allowFrom.length === 0) {
     return true;
