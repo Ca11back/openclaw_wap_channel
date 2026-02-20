@@ -146,8 +146,6 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
         dm_policy: account.config.dmPolicy ?? "pairing",
         require_mention_in_group: requireMentionInGroup,
         silent_pairing: silentPairing,
-        // backward compatibility
-        whitelist: allowFrom,
       },
     }),
   );

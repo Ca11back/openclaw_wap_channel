@@ -15,7 +15,6 @@ export interface WapAccountConfig {
   dmPolicy?: WapDmPolicy;
   requireMentionInGroup?: boolean;
   silentPairing?: boolean;
-  whitelist?: string[];
 }
 
 export interface WapChannelConfig extends WapAccountConfig {
@@ -45,7 +44,6 @@ function mergeAccountConfig(base: WapAccountConfig, next: WapAccountConfig): Wap
     ...next,
     allowFrom: next.allowFrom ?? base.allowFrom,
     groupAllowFrom: next.groupAllowFrom ?? base.groupAllowFrom,
-    whitelist: next.whitelist ?? base.whitelist,
   };
 }
 
@@ -81,7 +79,6 @@ export function resolveWapAccount(cfg: OpenClawConfig, accountId?: string | null
     dmPolicy: channelConfig.dmPolicy,
     requireMentionInGroup: channelConfig.requireMentionInGroup,
     silentPairing: channelConfig.silentPairing,
-    whitelist: channelConfig.whitelist,
   };
   const accountSpecific = channelConfig.accounts?.[id] ?? {};
   const merged = mergeAccountConfig(base, accountSpecific);
@@ -94,7 +91,7 @@ export function resolveWapAccount(cfg: OpenClawConfig, accountId?: string | null
 }
 
 export function resolveAllowFrom(config: WapAccountConfig): string[] {
-  return (config.allowFrom ?? config.whitelist ?? [])
+  return (config.allowFrom ?? [])
     .map((entry) => String(entry).trim())
     .filter((entry) => entry.length > 0);
 }
@@ -137,7 +134,6 @@ export const wapChannelConfigSchema = {
       },
       requireMentionInGroup: { type: "boolean" },
       silentPairing: { type: "boolean" },
-      whitelist: { type: "array", items: { type: "string" } },
       accounts: {
         type: "object",
         additionalProperties: {
@@ -155,7 +151,6 @@ export const wapChannelConfigSchema = {
             },
             requireMentionInGroup: { type: "boolean" },
             silentPairing: { type: "boolean" },
-            whitelist: { type: "array", items: { type: "string" } },
           },
         },
       },
@@ -169,14 +164,6 @@ export const wapChannelConfigSchema = {
     "channels.openclaw-channel-wap.accounts.*.authToken": {
       sensitive: true,
       help: "Per-account WebSocket bearer token.",
-    },
-    "channels.openclaw-channel-wap.whitelist": {
-      advanced: true,
-      help: "Deprecated alias of allowFrom for backward compatibility.",
-    },
-    "channels.openclaw-channel-wap.accounts.*.whitelist": {
-      advanced: true,
-      help: "Deprecated alias of allowFrom for backward compatibility.",
     },
     "channels.openclaw-channel-wap.requireMentionInGroup": {
       help: "When true, group messages trigger only when @mentioned.",

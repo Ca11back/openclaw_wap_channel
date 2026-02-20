@@ -50,7 +50,6 @@ export interface WapConfigCommand {
         dm_policy: "open" | "pairing" | "allowlist" | "disabled";
         require_mention_in_group: boolean;
         silent_pairing: boolean;
-        whitelist?: string[];
     };
 }
 

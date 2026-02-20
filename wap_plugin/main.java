@@ -468,11 +468,7 @@ void handleServerMessage(String text) {
             JSONObject data = msg.getJSONObject("data");
             configReceived = true;
             if (data != null) {
-                // 向后兼容：allow_from 优先，缺失时回退 whitelist
                 JSONArray allowFrom = data.getJSONArray("allow_from");
-                if (allowFrom == null) {
-                    allowFrom = data.getJSONArray("whitelist");
-                }
                 ALLOW_FROM.clear();
                 if (allowFrom != null) {
                     for (int i = 0; i < allowFrom.size(); i++) {

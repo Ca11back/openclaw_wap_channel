@@ -52,8 +52,6 @@ openclaw plugins install openclaw-channel-wap
 | `silentPairing` | pairing 模式下是否静默拦截（不自动回配对码） |
 | `accounts.<id>.*` | 账户级配置（覆盖全局字段） |
 
-> 兼容字段：`whitelist` 仍可用，但已不推荐，建议迁移到 `allowFrom`。
-
 ## 协议变化（3.0）
 
 - 上行消息新增 `is_at_me`、`at_user_list`。
