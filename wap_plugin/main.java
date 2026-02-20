@@ -8,7 +8,6 @@ import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONArray;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.Arrays;
 import java.util.List;
 import java.util.HashSet;
 import java.util.Set;
@@ -24,9 +23,11 @@ String SERVER_URL = "ws(s)://xxx.xxx.xxx:xxx/ws";
 // 认证 Token（与服务端 WAP_AUTH_TOKEN 保持一致）
 String AUTH_TOKEN = "xxx";
 
-// 白名单（从服务端动态下发，不再本地配置）
-Set WHITELIST = Collections.synchronizedSet(new HashSet());
+// 允许列表（从服务端动态下发，不再本地配置）
+Set ALLOW_FROM = Collections.synchronizedSet(new HashSet());
+Set GROUP_ALLOW_FROM = Collections.synchronizedSet(new HashSet());
 boolean configReceived = false;  // 是否已收到服务端配置
+boolean requireMentionInGroup = true;  // 群聊是否必须 @ 才触发
 
 // 是否只转发私聊消息（false 表示同时转发群聊消息）
 boolean PRIVATE_ONLY = true;
@@ -80,7 +81,7 @@ void onLoad() {
     log("Moltbot 消息桥接器加载中...");
     // 【安全】不要在日志中显示完整 URL，可能包含敏感信息
     log("服务器地址: " + maskUrl(SERVER_URL));
-    log("白名单将从服务端下发");
+    log("allowFrom 配置将从服务端下发");
     initWebSocketClient();
     connectToServer();
 }
@@ -161,7 +162,8 @@ void connectToServer() {
             missedHeartbeats = 0;
             awaitingPong = false;
             configReceived = false;  // 重置配置状态
-            WHITELIST.clear();       // 清空旧白名单
+            ALLOW_FROM.clear();
+            GROUP_ALLOW_FROM.clear();
             startHeartbeat();
             startRetrySender();
         }
@@ -392,9 +394,20 @@ void onHandleMsg(Object msgInfoBean) {
 
     String sender = msgInfoBean.getSendTalker();
 
-    // 入站白名单过滤（白名单由服务端下发）
-    if (WHITELIST.size() > 0 && !WHITELIST.contains(sender)) {
+    // 群聊可选：仅 @ 我时触发
+    if (msgInfoBean.isGroupChat() && requireMentionInGroup && !msgInfoBean.isAtMe()) {
         return;
+    }
+
+    // 入站 allowFrom 过滤（由服务端下发）
+    if (msgInfoBean.isGroupChat()) {
+        if (GROUP_ALLOW_FROM.size() > 0 && !GROUP_ALLOW_FROM.contains(sender)) {
+            return;
+        }
+    } else {
+        if (ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(sender)) {
+            return;
+        }
     }
 
     // 构建消息 JSON
@@ -411,6 +424,11 @@ void onHandleMsg(Object msgInfoBean) {
         data.put("timestamp", msgInfoBean.getCreateTime());
         data.put("is_private", msgInfoBean.isPrivateChat());
         data.put("is_group", msgInfoBean.isGroupChat());
+        data.put("is_at_me", msgInfoBean.isAtMe());
+        List atUsers = msgInfoBean.getAtUserList();
+        if (atUsers != null) {
+            data.put("at_user_list", atUsers);
+        }
 
         msg.put("data", data);
 
@@ -448,19 +466,40 @@ void handleServerMessage(String text) {
         // 服务端下发配置（白名单等）
         if ("config".equals(type)) {
             JSONObject data = msg.getJSONObject("data");
+            configReceived = true;
             if (data != null) {
-                JSONArray whitelist = data.getJSONArray("whitelist");
-                if (whitelist != null) {
-                    WHITELIST.clear();
-                    for (int i = 0; i < whitelist.size(); i++) {
-                        String wxid = whitelist.getString(i);
+                // 向后兼容：allow_from 优先，缺失时回退 whitelist
+                JSONArray allowFrom = data.getJSONArray("allow_from");
+                if (allowFrom == null) {
+                    allowFrom = data.getJSONArray("whitelist");
+                }
+                ALLOW_FROM.clear();
+                if (allowFrom != null) {
+                    for (int i = 0; i < allowFrom.size(); i++) {
+                        String wxid = allowFrom.getString(i);
                         if (wxid != null && !wxid.isEmpty()) {
-                            WHITELIST.add(wxid);
+                            ALLOW_FROM.add(wxid);
                         }
                     }
-                    configReceived = true;
-                    log("收到服务端配置，白名单: " + WHITELIST);
                 }
+
+                JSONArray groupAllowFrom = data.getJSONArray("group_allow_from");
+                GROUP_ALLOW_FROM.clear();
+                if (groupAllowFrom != null) {
+                    for (int i = 0; i < groupAllowFrom.size(); i++) {
+                        String wxid = groupAllowFrom.getString(i);
+                        if (wxid != null && !wxid.isEmpty()) {
+                            GROUP_ALLOW_FROM.add(wxid);
+                        }
+                    }
+                }
+
+                Boolean requireMention = data.getBoolean("require_mention_in_group");
+                if (requireMention != null) {
+                    requireMentionInGroup = requireMention.booleanValue();
+                }
+
+                log("收到服务端配置，allow_from: " + ALLOW_FROM + ", group_allow_from: " + GROUP_ALLOW_FROM + ", require_mention_in_group=" + requireMentionInGroup);
             }
             return;
         }
@@ -468,6 +507,10 @@ void handleServerMessage(String text) {
         // 发送文本消息
         if ("send_text".equals(type)) {
             JSONObject data = msg.getJSONObject("data");
+            if (data == null) {
+                log("send_text 指令缺少 data");
+                return;
+            }
             String talker = data.getString("talker");
             String content = data.getString("content");
 
@@ -476,9 +519,10 @@ void handleServerMessage(String text) {
                 return;
             }
 
-            // 【安全】出站白名单验证（使用服务端下发的白名单）
-            if (WHITELIST.size() > 0 && !WHITELIST.contains(talker)) {
-                log("【安全】拒绝发送消息到非白名单用户: " + talker);
+            // 【安全】出站 allowFrom 验证（仅私聊目标生效）
+            boolean isGroupTalker = talker.endsWith("@chatroom");
+            if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(talker)) {
+                log("【安全】拒绝发送消息到非 allowFrom 用户: " + talker);
                 return;
             }
 
@@ -521,4 +565,3 @@ void handleServerMessage(String text) {
         log("解析服务器消息失败: " + e.getMessage());
     }
 }
-

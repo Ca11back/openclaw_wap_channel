@@ -1,6 +1,6 @@
 {
     "name": "openclaw-channel-wap",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "description": "OpenClaw WAP channel plugin for WeChat message integration via WebSocket",
     "type": "module",
     "main": "./index.ts",
@@ -31,10 +31,7 @@
             "./index.ts"
         ]
     },
-    "scripts": {
-        "test:server": "tsx test/standalone-server.ts",
-        "test:client": "tsx test/mock-client.ts"
-    },
+    "scripts": {},
     "dependencies": {
         "ws": "^8.18.0"
     },

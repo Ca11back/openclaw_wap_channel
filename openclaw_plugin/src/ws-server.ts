@@ -1,28 +1,39 @@
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage } from "http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import type { WapUpstreamMessage, WapSendTextCommand, WapMessageData } from "./protocol.js";
+import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk";
+import {
+  CHANNEL_ID,
+  DEFAULT_ACCOUNT_ID,
+  DEFAULT_PORT,
+  getWapChannelConfig,
+  isSenderAllowed,
+  resolveAllowFrom,
+  resolveGroupAllowFrom,
+  resolveWapAccount,
+  type WapAccount,
+} from "./config.js";
+import type { WapMessageData, WapSendTextCommand, WapUpstreamMessage } from "./protocol.js";
 
 let wss: WebSocketServer | null = null;
 let runtime: OpenClawPluginApi | null = null;
 
-// 客户端管理：按 accountId 隔离
 interface ClientInfo {
-    ws: WebSocket;
-    accountId: string;
-    ip: string;
-    connectedAt: Date;
-    messageCount: number;
-    lastMessageAt: number;
+  ws: WebSocket;
+  accountId: string;
+  account: WapAccount;
+  ip: string;
+  connectedAt: Date;
+  messageCount: number;
+  lastMessageAt: number;
 }
+
 const clients = new Map<string, ClientInfo>();
 
-// 安全配置
-const DEFAULT_PORT = 8765;
-const AUTH_TOKEN_ENV = "WAP_AUTH_TOKEN"; // 环境变量名称，不是 token 值！
-const MAX_MESSAGE_SIZE = 64 * 1024; // 64KB
-const RATE_LIMIT_WINDOW_MS = 1000; // 1 秒
-const RATE_LIMIT_MAX_MESSAGES = 10; // 每秒最多 10 条消息
+const AUTH_TOKEN_ENV = "WAP_AUTH_TOKEN";
+const MAX_MESSAGE_SIZE = 64 * 1024;
+const RATE_LIMIT_WINDOW_MS = 1000;
+const RATE_LIMIT_MAX_MESSAGES = 10;
 
 const wechatContextHint = `
 [WeChat Context]
@@ -31,390 +42,446 @@ const wechatContextHint = `
 `;
 
 export function setWapRuntime(api: OpenClawPluginApi) {
-    runtime = api;
+  runtime = api;
 }
 
 export function getWapRuntime(): OpenClawPluginApi | null {
-    return runtime;
+  return runtime;
 }
 
 export function startWsService(api: OpenClawPluginApi) {
-    // 调试：输出完整配置
-    api.logger.debug(`WAP channels config: ${JSON.stringify(api.config.channels)}`);
+  if (wss) {
+    api.logger.warn("WAP WebSocket server is already running");
+    return;
+  }
 
-    const wapConfig = (api.config.channels as Record<string, unknown>)?.["openclaw-channel-wap"] as
-        | { port?: number; authToken?: string; whitelist?: string[] }
-        | undefined;
+  const channelConfig = getWapChannelConfig(api.config);
+  const port = channelConfig.port ?? DEFAULT_PORT;
 
-    api.logger.debug(`WAP wapConfig parsed: ${JSON.stringify(wapConfig)}`);
+  wss = new WebSocketServer({
+    port,
+    maxPayload: MAX_MESSAGE_SIZE,
+  });
+  api.logger.info(`WAP WebSocket server started on port ${port}`);
 
-    const port = wapConfig?.port ?? DEFAULT_PORT;
-    const authToken = process.env[AUTH_TOKEN_ENV] ?? wapConfig?.authToken;
-
-    // 【安全】强制要求配置 token
-    if (!authToken) {
-        api.logger.error(
-            "WAP WebSocket server NOT started: authToken is required. " +
-            "Set WAP_AUTH_TOKEN env or channels.openclaw-channel-wap.authToken in config."
-        );
-        return;
+  wss.on("connection", (ws, req) => {
+    const clientId = handleConnection(ws, req, api);
+    if (!clientId) {
+      return;
     }
-
-    wss = new WebSocketServer({
-        port,
-        maxPayload: MAX_MESSAGE_SIZE, // 【安全】限制消息大小
-    });
-    api.logger.info(`WAP WebSocket server started on port ${port}`);
-
-    // 日志：白名单配置
-    const whitelist = wapConfig?.whitelist ?? [];
-    api.logger.info(`WAP whitelist configured: ${whitelist.length > 0 ? whitelist.join(", ") : "(empty - all allowed)"}`);
-
-    wss.on("connection", (ws, req) => {
-        const clientId = handleConnection(ws, req, authToken, api, whitelist);
-        if (!clientId) return;
-
-        ws.on("message", (data) => handleMessage(clientId, data, api));
-        ws.on("close", () => handleDisconnect(clientId, api));
-        ws.on("error", (err) => api.logger.error(`WebSocket error: ${err.message}`));
-    });
+    ws.on("message", (data) => handleMessage(clientId, data, api));
+    ws.on("close", () => handleDisconnect(clientId, api));
+    ws.on("error", (err) => api.logger.error(`WAP WebSocket error: ${err.message}`));
+  });
 }
 
 export function stopWsService() {
-    if (wss) {
-        wss.close();
-        wss = null;
-    }
-    clients.clear();
-    runtime?.logger.info("WAP WebSocket server stopped");
+  if (wss) {
+    wss.close();
+    wss = null;
+  }
+  clients.clear();
+  runtime?.logger.info("WAP WebSocket server stopped");
 }
 
-function handleConnection(
-    ws: WebSocket,
-    req: IncomingMessage,
-    authToken: string,
-    api: OpenClawPluginApi,
-    whitelist: string[]
-): string | null {
-    // 获取客户端 IP
-    const ip = req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim()
-        ?? req.socket.remoteAddress
-        ?? "unknown";
+function resolveAccountId(req: IncomingMessage): string {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  return (
+    url.searchParams.get("accountId") ?? req.headers["x-wap-account-id"]?.toString() ?? DEFAULT_ACCOUNT_ID
+  );
+}
 
-    // 【安全】Token 认证（已强制要求）
-    const auth = req.headers.authorization;
-    if (auth !== `Bearer ${authToken}`) {
-        api.logger.warn(`WAP connection rejected from ${ip}: invalid token`);
-        ws.close(4001, "Unauthorized");
-        return null;
-    }
+function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPluginApi): string | null {
+  const ip =
+    req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ??
+    req.socket.remoteAddress ??
+    "unknown";
+  const accountId = resolveAccountId(req);
+  const account = resolveWapAccount(api.config, accountId);
 
-    // 从 query 或 header 获取 accountId（可选，默认 "default"）
-    const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-    const accountId = url.searchParams.get("accountId")
-        ?? req.headers["x-wap-account-id"]?.toString()
-        ?? "default";
+  if (!account.enabled) {
+    api.logger.warn(`WAP connection rejected for disabled account ${accountId} from ${ip}`);
+    ws.close(4003, "Account disabled");
+    return null;
+  }
 
-    const clientId = `wap-${accountId}-${Date.now()}`;
-    clients.set(clientId, {
-        ws,
-        accountId,
-        ip,
-        connectedAt: new Date(),
-        messageCount: 0,
-        lastMessageAt: 0,
-    });
+  const authToken = account.config.authToken ?? process.env[AUTH_TOKEN_ENV];
+  if (!authToken) {
+    api.logger.error(
+      `WAP connection rejected for ${accountId}: missing auth token (set account authToken or ${AUTH_TOKEN_ENV})`,
+    );
+    ws.close(4001, "Unauthorized");
+    return null;
+  }
 
-    api.logger.info(`WAP client connected: ${clientId} from ${ip} (account: ${accountId})`);
+  const auth = req.headers.authorization;
+  if (auth !== `Bearer ${authToken}`) {
+    api.logger.warn(`WAP connection rejected from ${ip}: invalid token for account ${accountId}`);
+    ws.close(4001, "Unauthorized");
+    return null;
+  }
 
-    // 下发配置（白名单等）
-    const configMessage = {
-        type: "config",
-        data: {
-            whitelist: whitelist,
-        },
-    };
-    ws.send(JSON.stringify(configMessage));
-    api.logger.debug(`WAP config sent to ${clientId}: whitelist=${whitelist.length} items`);
+  const clientId = `wap-${accountId}-${Date.now()}`;
+  clients.set(clientId, {
+    ws,
+    accountId,
+    account,
+    ip,
+    connectedAt: new Date(),
+    messageCount: 0,
+    lastMessageAt: 0,
+  });
 
-    return clientId;
+  const allowFrom = resolveAllowFrom(account.config);
+  const groupAllowFrom = resolveGroupAllowFrom(account.config);
+  const requireMentionInGroup = account.config.requireMentionInGroup ?? true;
+  const silentPairing = account.config.silentPairing ?? true;
+
+  ws.send(
+    JSON.stringify({
+      type: "config",
+      data: {
+        allow_from: allowFrom,
+        group_allow_from: groupAllowFrom,
+        dm_policy: account.config.dmPolicy ?? "pairing",
+        require_mention_in_group: requireMentionInGroup,
+        silent_pairing: silentPairing,
+        // backward compatibility
+        whitelist: allowFrom,
+      },
+    }),
+  );
+
+  api.logger.info(`WAP client connected: ${clientId} from ${ip} (account: ${accountId})`);
+  return clientId;
 }
 
 async function handleMessage(
-    clientId: string,
-    data: Buffer | ArrayBuffer | Buffer[],
-    api: OpenClawPluginApi
+  clientId: string,
+  data: Buffer | ArrayBuffer | Buffer[],
+  api: OpenClawPluginApi,
 ) {
-    const client = clients.get(clientId);
-    if (!client) return;
+  const client = clients.get(clientId);
+  if (!client) {
+    return;
+  }
 
-    // 【安全】速率限制
-    const now = Date.now();
-    if (now - client.lastMessageAt < RATE_LIMIT_WINDOW_MS) {
-        client.messageCount++;
-        if (client.messageCount > RATE_LIMIT_MAX_MESSAGES) {
-            api.logger.warn(`WAP rate limit exceeded for ${clientId}, dropping message`);
-            return;
-        }
-    } else {
-        client.messageCount = 1;
-        client.lastMessageAt = now;
+  const now = Date.now();
+  if (now - client.lastMessageAt < RATE_LIMIT_WINDOW_MS) {
+    client.messageCount++;
+    if (client.messageCount > RATE_LIMIT_MAX_MESSAGES) {
+      api.logger.warn(`WAP rate limit exceeded for ${clientId}, dropping message`);
+      return;
+    }
+  } else {
+    client.messageCount = 1;
+    client.lastMessageAt = now;
+  }
+
+  try {
+    const text = Buffer.isBuffer(data)
+      ? data.toString()
+      : Array.isArray(data)
+        ? Buffer.concat(data).toString()
+        : Buffer.from(data).toString();
+    const parsed = JSON.parse(text) as unknown;
+    const msg = validateUpstreamMessage(parsed);
+    if (!msg) {
+      api.logger.warn(`WAP invalid message structure from ${clientId}`);
+      return;
     }
 
-    try {
-        const text = Buffer.isBuffer(data)
-            ? data.toString()
-            : Array.isArray(data)
-                ? Buffer.concat(data).toString()
-                : Buffer.from(data).toString();
-
-        // 【安全】先解析 JSON
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(text);
-        } catch {
-            api.logger.warn(`WAP invalid JSON from ${clientId}`);
-            return;
-        }
-
-        // 【安全】验证消息结构
-        const msg = validateUpstreamMessage(parsed);
-        if (!msg) {
-            api.logger.warn(`WAP invalid message structure from ${clientId}`);
-            return;
-        }
-
-        if (msg.type === "heartbeat") {
-            client.ws.send(JSON.stringify({ type: "pong" }));
-            return;
-        }
-
-        if (msg.type === "message") {
-            api.logger.debug(
-                `WAP message from ${msg.data.sender}: ${msg.data.content.substring(0, 50)}`
-            );
-
-            // 使用 OpenClaw 的正确 API 处理入站消息
-            await processWapInboundMessage(api, client.accountId, msg.data, client.ws);
-        }
-    } catch (err) {
-        api.logger.error(`Failed to handle WAP message: ${err}`);
+    if (msg.type === "heartbeat") {
+      client.ws.send(JSON.stringify({ type: "pong" }));
+      return;
     }
+
+    await processWapInboundMessage({
+      api,
+      client,
+      msgData: msg.data,
+      ws: client.ws,
+    });
+  } catch (err) {
+    api.logger.error(`Failed to handle WAP message: ${String(err)}`);
+  }
 }
 
-/**
- * 处理 WAP 入站消息，使用 OpenClaw 的 dispatchReplyFromConfig
- */
-async function processWapInboundMessage(
-    api: OpenClawPluginApi,
-    accountId: string,
-    msgData: WapMessageData,
-    ws: WebSocket
-) {
-    const core = api.runtime;
-    const cfg = api.config;
+async function processWapInboundMessage(params: {
+  api: OpenClawPluginApi;
+  client: ClientInfo;
+  msgData: WapMessageData;
+  ws: WebSocket;
+}) {
+  const { api, client, msgData, ws } = params;
+  const core = api.runtime;
+  const cfg = api.config;
+  const bodyText = msgData.content.trim();
+  if (!bodyText) {
+    return;
+  }
 
-    // 确定消息类型
-    const kind: "dm" | "group" = msgData.is_group ? "group" : "dm";
-    const chatType = kind === "dm" ? "direct" : "group";
+  const isGroup = msgData.is_group;
+  const kind: "dm" | "group" = isGroup ? "group" : "dm";
+  const chatType = isGroup ? "group" : "direct";
+  const dmPolicy = client.account.config.dmPolicy ?? "pairing";
+  const allowFrom = resolveAllowFrom(client.account.config);
+  const groupAllowFrom = resolveGroupAllowFrom(client.account.config);
+  const configuredAllowFrom = isGroup ? groupAllowFrom : allowFrom;
+  const senderAllowed = isSenderAllowed(msgData.sender, configuredAllowFrom);
 
-    // 解析路由
-    const route = core.channel.routing.resolveAgentRoute({
-        cfg,
-        channel: "openclaw-channel-wap",
-        accountId,
-        peer: {
-            kind,
-            id: msgData.talker,
-        },
-    });
-
-    const sessionKey = route.sessionKey;
-    const bodyText = msgData.content.trim();
-
-    if (!bodyText) return;
-
-    // 记录 channel activity
-    core.channel.activity.record({
-        channel: "openclaw-channel-wap",
-        accountId,
-        direction: "inbound",
-    });
-
-    // 构建 from 标签
-    const fromLabel = kind === "dm"
-        ? msgData.sender
-        : `${msgData.sender} in ${msgData.talker}`;
-
-    // 格式化入站消息
-    const body = core.channel.reply.formatInboundEnvelope({
-        channel: "WeChat",
-        from: fromLabel,
-        timestamp: msgData.timestamp,
-        body: bodyText + "\n\n" + wechatContextHint,
-        chatType,
-        sender: { name: msgData.sender, id: msgData.sender },
-    });
-
-    // 构建 context payload
-    const ctxPayload = core.channel.reply.finalizeInboundContext({
-        Body: body,
-        RawBody: bodyText,
-        CommandBody: bodyText,
-        From: kind === "dm" ? `openclaw-channel-wap:${msgData.sender}` : `openclaw-channel-wap:group:${msgData.talker}`,
-        To: msgData.talker,
-        SessionKey: sessionKey,
-        AccountId: route.accountId,
-        ChatType: chatType,
-        ConversationLabel: fromLabel,
-        GroupSubject: kind !== "dm" ? msgData.talker : undefined,
-        SenderName: msgData.sender,
-        SenderId: msgData.sender,
-        Provider: "openclaw-channel-wap" as const,
-        Surface: "openclaw-channel-wap" as const,
-        MessageSid: String(msgData.msg_id),
-        Timestamp: msgData.timestamp,
-        WasMentioned: undefined,
-        CommandAuthorized: true, // WAP 默认授权（已通过 token 认证）
-        OriginatingChannel: "openclaw-channel-wap" as const,
-        OriginatingTo: msgData.talker,
-    });
-
-    // 获取文本分块限制
-    const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "openclaw-channel-wap", accountId, {
-        fallbackLimit: 4000,
-    });
-
-    // 创建回复分发器
-    const { dispatcher, replyOptions, markDispatchIdle } =
-        core.channel.reply.createReplyDispatcherWithTyping({
-            humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
-            deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
-                const replyText = payload.text ?? "";
-                if (!replyText) return;
-
-                // 分块发送
-                const chunkMode = core.channel.text.resolveChunkMode(cfg, "openclaw-channel-wap", accountId);
-                const chunks = core.channel.text.chunkMarkdownTextWithMode(replyText, textLimit, chunkMode);
-
-                for (const chunk of chunks.length > 0 ? chunks : [replyText]) {
-                    if (!chunk) continue;
-
-                    // 通过 WebSocket 发送回复
-                    const command: WapSendTextCommand = {
-                        type: "send_text",
-                        data: {
-                            talker: msgData.talker,
-                            content: chunk,
-                        },
-                    };
-
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify(command));
-                        api.logger.debug(`WAP reply sent to ${msgData.talker}: ${chunk.substring(0, 50)}...`);
-                    } else {
-                        api.logger.warn(`WAP WebSocket not open, cannot send reply to ${msgData.talker}`);
-                    }
-                }
-            },
-            onError: (err: unknown, info: { kind: string }) => {
-                api.logger.error(`WAP ${info.kind} reply failed: ${String(err)}`);
-            },
+  if (isGroup) {
+    const requireMention = client.account.config.requireMentionInGroup ?? true;
+    if (requireMention && msgData.is_at_me !== true) {
+      api.logger.debug(`WAP drop group message from ${msgData.sender}: mention required`);
+      return;
+    }
+    if (configuredAllowFrom.length > 0 && !senderAllowed) {
+      api.logger.debug(`WAP drop group message from ${msgData.sender}: sender not allowlisted`);
+      return;
+    }
+  } else {
+    if (dmPolicy === "disabled") {
+      api.logger.debug(`WAP drop DM from ${msgData.sender}: dmPolicy=disabled`);
+      return;
+    }
+    if (dmPolicy !== "open" && !senderAllowed) {
+      if (dmPolicy === "pairing") {
+        const silentPairing = client.account.config.silentPairing ?? true;
+        const request = await core.channel.pairing.upsertPairingRequest({
+          channel: CHANNEL_ID,
+          id: msgData.sender,
+          meta: { name: msgData.sender },
         });
+        api.logger.info(
+          `WAP pairing request sender=${msgData.sender} account=${client.accountId} created=${request.created}`,
+        );
+        if (!silentPairing && request.created && ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "send_text",
+              data: {
+                talker: msgData.talker,
+                content: core.channel.pairing.buildPairingReply({
+                  channel: CHANNEL_ID,
+                  idLine: `Your WeChat id: ${msgData.sender}`,
+                  code: request.code,
+                }),
+              },
+            }),
+          );
+        }
+      }
+      return;
+    }
+  }
 
-    // 调用 OpenClaw 的核心回复处理
-    await core.channel.reply.dispatchReplyFromConfig({
-        ctx: ctxPayload,
-        cfg,
-        dispatcher,
-        replyOptions,
+  const commandAuth = await resolveSenderCommandAuthorization({
+    cfg,
+    rawBody: bodyText,
+    isGroup,
+    dmPolicy,
+    configuredAllowFrom,
+    senderId: msgData.sender,
+    isSenderAllowed: (senderId, effectiveAllowFrom) => isSenderAllowed(senderId, effectiveAllowFrom),
+    readAllowFromStore: async () => await core.channel.pairing.readAllowFromStore(CHANNEL_ID),
+    shouldComputeCommandAuthorized: (rawBody, config) =>
+      core.channel.commands.shouldComputeCommandAuthorized(rawBody, config),
+    resolveCommandAuthorizedFromAuthorizers: (authParams) =>
+      core.channel.commands.resolveCommandAuthorizedFromAuthorizers(authParams),
+  });
+
+  if (
+    commandAuth.commandAuthorized === false &&
+    core.channel.text.hasControlCommand(bodyText, cfg)
+  ) {
+    api.logger.debug(`WAP blocked unauthorized control command from ${msgData.sender}`);
+    return;
+  }
+
+  const route = core.channel.routing.resolveAgentRoute({
+    cfg,
+    channel: CHANNEL_ID,
+    accountId: client.accountId,
+    peer: {
+      kind,
+      id: msgData.talker,
+    },
+  });
+
+  core.channel.activity.record({
+    channel: CHANNEL_ID,
+    accountId: client.accountId,
+    direction: "inbound",
+  });
+
+  const fromLabel = isGroup ? `${msgData.sender} in ${msgData.talker}` : msgData.sender;
+  const body = core.channel.reply.formatInboundEnvelope({
+    channel: "WeChat",
+    from: fromLabel,
+    timestamp: msgData.timestamp,
+    body: `${bodyText}\n\n${wechatContextHint}`,
+    chatType,
+    sender: { name: msgData.sender, id: msgData.sender },
+  });
+
+  const ctxPayload = core.channel.reply.finalizeInboundContext({
+    Body: body,
+    RawBody: bodyText,
+    CommandBody: bodyText,
+    From: isGroup ? `${CHANNEL_ID}:group:${msgData.talker}` : `${CHANNEL_ID}:${msgData.sender}`,
+    To: msgData.talker,
+    SessionKey: route.sessionKey,
+    AccountId: route.accountId,
+    ChatType: chatType,
+    ConversationLabel: fromLabel,
+    GroupSubject: isGroup ? msgData.talker : undefined,
+    SenderName: msgData.sender,
+    SenderId: msgData.sender,
+    Provider: CHANNEL_ID,
+    Surface: CHANNEL_ID,
+    MessageSid: String(msgData.msg_id),
+    Timestamp: msgData.timestamp,
+    WasMentioned: isGroup ? msgData.is_at_me === true : undefined,
+    CommandAuthorized: commandAuth.commandAuthorized,
+    OriginatingChannel: CHANNEL_ID,
+    OriginatingTo: msgData.talker,
+  });
+
+  const textLimit = core.channel.text.resolveTextChunkLimit(cfg, CHANNEL_ID, client.accountId, {
+    fallbackLimit: 4000,
+  });
+
+  const { dispatcher, replyOptions, markDispatchIdle } =
+    core.channel.reply.createReplyDispatcherWithTyping({
+      humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
+      deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
+        const replyText = payload.text ?? "";
+        if (!replyText) {
+          return;
+        }
+        const chunkMode = core.channel.text.resolveChunkMode(cfg, CHANNEL_ID, client.accountId);
+        const chunks = core.channel.text.chunkMarkdownTextWithMode(replyText, textLimit, chunkMode);
+        for (const chunk of chunks.length > 0 ? chunks : [replyText]) {
+          if (!chunk) {
+            continue;
+          }
+          const command: WapSendTextCommand = {
+            type: "send_text",
+            data: {
+              talker: msgData.talker,
+              content: chunk,
+            },
+          };
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(command));
+          } else {
+            api.logger.warn(`WAP WebSocket not open, cannot send reply to ${msgData.talker}`);
+          }
+        }
+      },
+      onError: (err: unknown, info: { kind: string }) => {
+        api.logger.error(`WAP ${info.kind} reply failed: ${String(err)}`);
+      },
     });
 
+  try {
+    await core.channel.reply.dispatchReplyFromConfig({
+      ctx: ctxPayload,
+      cfg,
+      dispatcher,
+      replyOptions,
+    });
+  } finally {
     markDispatchIdle();
+  }
 }
 
-// 【安全】验证上行消息结构
 function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
-    if (typeof data !== "object" || data === null) return null;
-
-    const obj = data as Record<string, unknown>;
-
-    if (obj.type === "heartbeat") {
-        return { type: "heartbeat" };
-    }
-
-    if (obj.type === "message") {
-        const msgData = obj.data;
-        if (typeof msgData !== "object" || msgData === null) return null;
-
-        const d = msgData as Record<string, unknown>;
-
-        // 验证必须字段
-        if (
-            typeof d.msg_id !== "number" ||
-            typeof d.talker !== "string" ||
-            typeof d.sender !== "string" ||
-            typeof d.content !== "string" ||
-            typeof d.timestamp !== "number" ||
-            typeof d.is_private !== "boolean" ||
-            typeof d.is_group !== "boolean"
-        ) {
-            return null;
-        }
-
-        return {
-            type: "message",
-            data: {
-                msg_id: d.msg_id,
-                msg_type: typeof d.msg_type === "number" ? d.msg_type : 0,
-                talker: d.talker,
-                sender: d.sender,
-                content: d.content,
-                timestamp: d.timestamp,
-                is_private: d.is_private,
-                is_group: d.is_group,
-            },
-        };
-    }
-
+  if (typeof data !== "object" || data === null) {
     return null;
+  }
+
+  const obj = data as Record<string, unknown>;
+  if (obj.type === "heartbeat") {
+    return { type: "heartbeat" };
+  }
+
+  if (obj.type !== "message") {
+    return null;
+  }
+
+  const msgData = obj.data;
+  if (typeof msgData !== "object" || msgData === null) {
+    return null;
+  }
+  const d = msgData as Record<string, unknown>;
+  if (
+    typeof d.msg_id !== "number" ||
+    typeof d.talker !== "string" ||
+    typeof d.sender !== "string" ||
+    typeof d.content !== "string" ||
+    typeof d.timestamp !== "number" ||
+    typeof d.is_private !== "boolean" ||
+    typeof d.is_group !== "boolean"
+  ) {
+    return null;
+  }
+  const isAtMe = typeof d.is_at_me === "boolean" ? d.is_at_me : false;
+  const atUserList = Array.isArray(d.at_user_list)
+    ? d.at_user_list.map((entry) => String(entry))
+    : [];
+  return {
+    type: "message",
+    data: {
+      msg_id: d.msg_id,
+      msg_type: typeof d.msg_type === "number" ? d.msg_type : 0,
+      talker: d.talker,
+      sender: d.sender,
+      content: d.content,
+      timestamp: d.timestamp,
+      is_private: d.is_private,
+      is_group: d.is_group,
+      is_at_me: isAtMe,
+      at_user_list: atUserList,
+    },
+  };
 }
 
 function handleDisconnect(clientId: string, api: OpenClawPluginApi) {
-    const client = clients.get(clientId);
-    clients.delete(clientId);
-    api.logger.info(
-        `WAP client disconnected: ${clientId}` +
-        (client ? ` (was connected for ${Date.now() - client.connectedAt.getTime()}ms)` : "")
-    );
+  const client = clients.get(clientId);
+  clients.delete(clientId);
+  api.logger.info(
+    `WAP client disconnected: ${clientId}` +
+      (client ? ` (was connected for ${Date.now() - client.connectedAt.getTime()}ms)` : ""),
+  );
 }
 
-// 发送消息到指定 accountId 的客户端（而非广播）
 export function sendToClient(command: WapSendTextCommand, accountId?: string): boolean {
-    let sent = false;
-    const targetAccountId = accountId ?? "default";
-
-    for (const [, client] of clients) {
-        if (client.accountId === targetAccountId && client.ws.readyState === WebSocket.OPEN) {
-            client.ws.send(JSON.stringify(command));
-            sent = true;
-            break; // 只发送给第一个匹配的客户端
-        }
+  const targetAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
+  for (const [, client] of clients) {
+    if (client.accountId === targetAccountId && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(JSON.stringify(command));
+      return true;
     }
-    return sent;
+  }
+  return false;
 }
 
-// 获取当前连接的客户端数量
 export function getClientCount(): number {
-    return clients.size;
+  return clients.size;
 }
 
-// 获取客户端状态（用于调试）
-export function getClientStats(): Array<{ clientId: string; accountId: string; ip: string; connectedAt: Date }> {
-    return Array.from(clients.entries()).map(([clientId, info]) => ({
-        clientId,
-        accountId: info.accountId,
-        ip: info.ip,
-        connectedAt: info.connectedAt,
-    }));
+export function getClientStats(): Array<{
+  clientId: string;
+  accountId: string;
+  ip: string;
+  connectedAt: Date;
+}> {
+  return Array.from(clients.entries()).map(([clientId, info]) => ({
+    clientId,
+    accountId: info.accountId,
+    ip: info.ip,
+    connectedAt: info.connectedAt,
+  }));
 }

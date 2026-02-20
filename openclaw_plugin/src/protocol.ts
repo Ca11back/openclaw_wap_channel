@@ -11,6 +11,8 @@ export interface WapMessageData {
     timestamp: number; // 毫秒时间戳
     is_private: boolean;
     is_group: boolean;
+    is_at_me?: boolean;
+    at_user_list?: string[];
 }
 
 export interface WapMessagePayload {
@@ -40,6 +42,18 @@ export interface WapPongCommand {
     type: "pong";
 }
 
+export interface WapConfigCommand {
+    type: "config";
+    data: {
+        allow_from: string[];
+        group_allow_from: string[];
+        dm_policy: "open" | "pairing" | "allowlist" | "disabled";
+        require_mention_in_group: boolean;
+        silent_pairing: boolean;
+        whitelist?: string[];
+    };
+}
+
 // 预留接口：图片消息
 export interface WapSendImageCommand {
     type: "send_image";
@@ -62,5 +76,6 @@ export interface WapSendVoiceCommand {
 export type WapDownstreamCommand =
     | WapSendTextCommand
     | WapPongCommand
+    | WapConfigCommand
     | WapSendImageCommand
     | WapSendVoiceCommand;

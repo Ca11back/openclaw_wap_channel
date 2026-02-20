@@ -1,6 +1,6 @@
 # OpenClaw WAP Channel
 
-通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的~~完整~~解决方案(目前仅支持文字消息)。
+通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的解决方案（当前版本 `3.0.0`，仅支持文字消息）。
 
 ## 📦 组件说明
 
@@ -28,7 +28,10 @@ openclaw plugins install openclaw-channel-wap
       "enabled": true,
       "port": 8765,
       "authToken": "your-secret-token-32chars",
-      "whitelist": ["wxid_user1", "wxid_user2"]
+      "allowFrom": ["wxid_user1", "wxid_user2"],
+      "dmPolicy": "pairing",
+      "requireMentionInGroup": true,
+      "silentPairing": true
     }
   }
 }
@@ -54,7 +57,10 @@ openclaw plugins install openclaw-channel-wap
 ## 🔒 安全特性
 
 - Token 认证
-- 双向白名单（入站/出站）
+- 多账号配置
+- DM 策略（pairing / allowlist / open / disabled）
+- 静默 pairing（未授权用户不自动回复）
+- 群聊 @ 门禁（可配置必须 @ 才触发）
 - 速率限制
 - 断线重连
 

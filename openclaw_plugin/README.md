@@ -1,22 +1,16 @@
 # OpenClaw WAP Channel
 
-OpenClaw AI 助手的微信消息通道插件，接收来自 WAuxiliary 插件的消息并调用 AI 处理。
+OpenClaw 的微信消息通道插件，通过 WAuxiliary 插件接入微信消息。
 
-> ⚠️ **重要提示**  
-> 本插件需要配合 **WAuxiliary 微信插件**一起使用才能工作。  
-> 📦 **完整使用说明**请查看：[https://github.com/Ca11back/openclaw-channel-wap](https://github.com/Ca11back/openclaw-channel-wap)
-
----
-
-## 📦 安装
+## 安装
 
 ```bash
 openclaw plugins install openclaw-channel-wap
 ```
 
-## ⚙️ 配置
+## 配置
 
-编辑 OpenClaw 配置文件 `~/.openclaw/openclaw.json`，添加 WAP channel 配置：
+编辑 `~/.openclaw/openclaw.json`：
 
 ```json
 {
@@ -24,76 +18,51 @@ openclaw plugins install openclaw-channel-wap
     "openclaw-channel-wap": {
       "enabled": true,
       "port": 8765,
-      "authToken": "your-secret-token-here",
-      "whitelist": [
-        "wxid_example1",
-        "wxid_example2"
-      ]
+      "authToken": "global-token",
+      "allowFrom": ["wxid_owner"],
+      "dmPolicy": "pairing",
+      "requireMentionInGroup": true,
+      "silentPairing": true,
+      "accounts": {
+        "phone-a": {
+          "enabled": true,
+          "authToken": "token-for-phone-a",
+          "allowFrom": ["wxid_owner_a"],
+          "groupAllowFrom": ["wxid_owner_a"],
+          "dmPolicy": "pairing",
+          "requireMentionInGroup": true,
+          "silentPairing": true
+        }
+      }
     }
   }
 }
 ```
 
-### 配置说明
+## 字段说明
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `enabled` | boolean | 是 | 是否启用此 channel |
-| `port` | number | 是 | WebSocket 服务器端口 |
-| `authToken` | string | 是 | 认证 Token（需与 WAP 插件配置一致） |
-| `whitelist` | string[] | 否 | 白名单用户列表（为空则不限制） |
+| 字段 | 说明 |
+|---|---|
+| `port` | WebSocket 服务端口（全局） |
+| `authToken` | 全局连接 token（可被账户级覆盖） |
+| `allowFrom` | 私聊允许列表 |
+| `groupAllowFrom` | 群聊发送者允许列表 |
+| `dmPolicy` | `pairing/allowlist/open/disabled` |
+| `requireMentionInGroup` | 群聊是否必须 @ 机器人 |
+| `silentPairing` | pairing 模式下是否静默拦截（不自动回配对码） |
+| `accounts.<id>.*` | 账户级配置（覆盖全局字段） |
 
-## 🚀 使用
+> 兼容字段：`whitelist` 仍可用，但已不推荐，建议迁移到 `allowFrom`。
 
-安装并配置后，插件会：
+## 协议变化（3.0）
 
-1. 启动 WebSocket 服务器监听指定端口
-2. 验证来自 WAP 插件的连接 Token
-3. 接收微信消息并转发给 OpenClaw AI
-4. 将 AI 回复通过 WebSocket 发送回插件
+- 上行消息新增 `is_at_me`、`at_user_list`。
+- 下行 `config` 支持 `allow_from/group_allow_from/dm_policy/require_mention_in_group/silent_pairing`。
+- 默认 `dmPolicy=pairing`，并支持静默 pairing（不回消息，仅登记请求）。
 
-## 📡 协议
-
-### 接收消息（from WAP plugin）
-
-```json
-{
-  "type": "message",
-  "data": {
-    "msg_id": 12345678,
-    "talker": "wxid_xxx",
-    "content": "用户消息",
-    "timestamp": 1706600000000,
-    "is_private": true
-  }
-}
-```
-
-### 发送回复（to WAP plugin）
-
-```json
-{
-  "type": "send_text",
-  "data": {
-    "talker": "wxid_xxx",
-    "content": "AI 回复内容"
-  }
-}
-```
-
-## 🔧 开发与测试
+## 开发
 
 ```bash
-# 安装依赖
 npm install
-
-# 运行测试服务器
-npm run test:server
-
-# 运行模拟客户端
-npm run test:client
+npm exec tsc --noEmit
 ```
-
-## 📝 许可
-
-MIT License
