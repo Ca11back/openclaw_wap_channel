@@ -129,6 +129,38 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       runtime?.logger.debug(`WAP sendText to ${normalizedTarget}: ${text.substring(0, 50)}...`);
       return { ok: true, channel: CHANNEL_ID };
     },
+    sendMedia: async ({ to, text, mediaUrl, accountId }) => {
+      const runtime = getWapRuntime();
+      if (!mediaUrl) {
+        return {
+          ok: false,
+          error: "mediaUrl is required",
+          channel: CHANNEL_ID,
+        };
+      }
+      const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
+      const normalizedTarget = normalizeWapMessagingTarget(to);
+      const content = text ? `${text}\n\nAttachment: ${mediaUrl}` : `Attachment: ${mediaUrl}`;
+      const sent = sendToClient(
+        {
+          type: "send_text",
+          data: { talker: normalizedTarget, content },
+        },
+        effectiveAccountId,
+      );
+      if (!sent) {
+        runtime?.logger.warn(
+          `WAP sendMedia failed: no connected clients for account ${effectiveAccountId}`,
+        );
+        return {
+          ok: false,
+          error: "No connected WAP clients",
+          channel: CHANNEL_ID,
+        };
+      }
+      runtime?.logger.debug(`WAP sendMedia to ${normalizedTarget}: ${mediaUrl}`);
+      return { ok: true, channel: CHANNEL_ID };
+    },
   },
   status: {
     defaultRuntime: {

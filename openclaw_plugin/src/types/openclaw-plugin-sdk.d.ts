@@ -87,6 +87,13 @@ declare module "openclaw/plugin-sdk" {
         text: string;
         accountId?: string | null;
       }) => Promise<OutboundDeliveryResult>;
+      sendMedia?: (ctx: {
+        cfg: OpenClawConfig;
+        to: string;
+        text: string;
+        mediaUrl?: string;
+        accountId?: string | null;
+      }) => Promise<OutboundDeliveryResult>;
     };
     status?: {
       defaultRuntime?: Record<string, unknown>;
