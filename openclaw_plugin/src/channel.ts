@@ -194,4 +194,30 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       totalClients: getClientCount(),
     }),
   },
+  gateway: {
+    startAccount: async (ctx) => {
+      ctx.setStatus({
+        accountId: ctx.accountId,
+        running: true,
+        lastStartAt: Date.now(),
+        lastError: null,
+      });
+      await new Promise<void>((resolve) => {
+        if (ctx.abortSignal.aborted) {
+          resolve();
+          return;
+        }
+        ctx.abortSignal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
+      });
+    },
+    stopAccount: async (ctx) => {
+      ctx.setStatus({
+        accountId: ctx.accountId,
+        running: false,
+        lastStopAt: Date.now(),
+      });
+    },
+  },
 };

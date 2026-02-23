@@ -111,6 +111,38 @@ declare module "openclaw/plugin-sdk" {
         snapshot: Record<string, unknown>;
       }) => Record<string, unknown> | Promise<Record<string, unknown>>;
     };
+    gateway?: {
+      startAccount?: (ctx: {
+        cfg: OpenClawConfig;
+        accountId: string;
+        account: ResolvedAccount;
+        runtime: unknown;
+        abortSignal: AbortSignal;
+        log?: {
+          debug?: (msg: string) => void;
+          info?: (msg: string) => void;
+          warn?: (msg: string) => void;
+          error?: (msg: string) => void;
+        };
+        getStatus: () => Record<string, unknown>;
+        setStatus: (next: Record<string, unknown>) => void;
+      }) => Promise<void | { stop?: () => void | Promise<void> }>;
+      stopAccount?: (ctx: {
+        cfg: OpenClawConfig;
+        accountId: string;
+        account: ResolvedAccount;
+        runtime: unknown;
+        abortSignal: AbortSignal;
+        log?: {
+          debug?: (msg: string) => void;
+          info?: (msg: string) => void;
+          warn?: (msg: string) => void;
+          error?: (msg: string) => void;
+        };
+        getStatus: () => Record<string, unknown>;
+        setStatus: (next: Record<string, unknown>) => void;
+      }) => Promise<void>;
+    };
   }
 
   export interface PluginRuntime {
