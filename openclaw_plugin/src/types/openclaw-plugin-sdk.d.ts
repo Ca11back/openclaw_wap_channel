@@ -109,10 +109,11 @@ declare module "openclaw/plugin-sdk" {
   export interface PluginRuntime {
     channel: {
       pairing: {
-        readAllowFromStore: (channel: string) => Promise<string[]>;
+        readAllowFromStore: (channel: string, accountId?: string | null) => Promise<string[]>;
         upsertPairingRequest: (params: {
           channel: string;
           id: string;
+          accountId?: string | null;
           meta?: Record<string, unknown>;
         }) => Promise<{ code: string; created: boolean }>;
         buildPairingReply: (params: {

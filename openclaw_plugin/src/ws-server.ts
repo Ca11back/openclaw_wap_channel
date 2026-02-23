@@ -225,7 +225,12 @@ async function processWapInboundMessage(params: {
   const dmPolicy = client.account.config.dmPolicy ?? "pairing";
   const allowFrom = resolveAllowFrom(client.account.config);
   const groupAllowFrom = resolveGroupAllowFrom(client.account.config);
-  const configuredAllowFrom = isGroup ? groupAllowFrom : allowFrom;
+  const storeAllowFrom = isGroup
+    ? []
+    : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, client.accountId);
+  const effectiveDmAllowFrom =
+    dmPolicy === "allowlist" ? allowFrom : [...allowFrom, ...storeAllowFrom];
+  const configuredAllowFrom = isGroup ? groupAllowFrom : effectiveDmAllowFrom;
   const senderAllowed = isSenderAllowed(
     msgData.sender,
     configuredAllowFrom,
@@ -253,6 +258,7 @@ async function processWapInboundMessage(params: {
         const request = await core.channel.pairing.upsertPairingRequest({
           channel: CHANNEL_ID,
           id: msgData.sender,
+          accountId: client.accountId,
           meta: { name: msgData.sender },
         });
         api.logger.info(
@@ -287,7 +293,8 @@ async function processWapInboundMessage(params: {
     senderId: msgData.sender,
     isSenderAllowed: (senderId, effectiveAllowFrom) =>
       isSenderAllowed(senderId, effectiveAllowFrom, isGroup ? true : dmPolicy === "open"),
-    readAllowFromStore: async () => await core.channel.pairing.readAllowFromStore(CHANNEL_ID),
+    readAllowFromStore: async () =>
+      isGroup ? [] : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, client.accountId),
     shouldComputeCommandAuthorized: (rawBody, config) =>
       core.channel.commands.shouldComputeCommandAuthorized(rawBody, config),
     resolveCommandAuthorizedFromAuthorizers: (authParams) =>
