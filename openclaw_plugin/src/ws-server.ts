@@ -226,7 +226,11 @@ async function processWapInboundMessage(params: {
   const allowFrom = resolveAllowFrom(client.account.config);
   const groupAllowFrom = resolveGroupAllowFrom(client.account.config);
   const configuredAllowFrom = isGroup ? groupAllowFrom : allowFrom;
-  const senderAllowed = isSenderAllowed(msgData.sender, configuredAllowFrom);
+  const senderAllowed = isSenderAllowed(
+    msgData.sender,
+    configuredAllowFrom,
+    isGroup ? true : dmPolicy === "open",
+  );
 
   if (isGroup) {
     const requireMention = client.account.config.requireMentionInGroup ?? true;
@@ -281,7 +285,8 @@ async function processWapInboundMessage(params: {
     dmPolicy,
     configuredAllowFrom,
     senderId: msgData.sender,
-    isSenderAllowed: (senderId, effectiveAllowFrom) => isSenderAllowed(senderId, effectiveAllowFrom),
+    isSenderAllowed: (senderId, effectiveAllowFrom) =>
+      isSenderAllowed(senderId, effectiveAllowFrom, isGroup ? true : dmPolicy === "open"),
     readAllowFromStore: async () => await core.channel.pairing.readAllowFromStore(CHANNEL_ID),
     shouldComputeCommandAuthorized: (rawBody, config) =>
       core.channel.commands.shouldComputeCommandAuthorized(rawBody, config),

@@ -152,9 +152,13 @@ export function resolveWapOutboundTarget(params: {
   };
 }
 
-export function isSenderAllowed(senderId: string, allowFrom: string[]): boolean {
+export function isSenderAllowed(
+  senderId: string,
+  allowFrom: string[],
+  allowWhenEmpty = true,
+): boolean {
   if (allowFrom.length === 0) {
-    return true;
+    return allowWhenEmpty;
   }
   const normalizedSender = normalizeSenderId(senderId);
   return allowFrom.some((entry) => {
