@@ -29,8 +29,8 @@ Set GROUP_ALLOW_FROM = Collections.synchronizedSet(new HashSet());
 boolean configReceived = false;  // 是否已收到服务端配置
 boolean requireMentionInGroup = true;  // 群聊是否必须 @ 才触发
 
-// 是否只转发私聊消息（false 表示同时转发群聊消息）
-boolean PRIVATE_ONLY = true;
+// 是否只转发私聊消息（建议 false，由服务端策略统一控制群聊）
+boolean PRIVATE_ONLY = false;
 
 // 心跳间隔（毫秒）
 long HEARTBEAT_INTERVAL = 20000;
@@ -393,9 +393,10 @@ void onHandleMsg(Object msgInfoBean) {
     }
 
     String sender = msgInfoBean.getSendTalker();
+    boolean isMentionedMe = resolveIsMentionedMe(msgInfoBean);
 
     // 群聊可选：仅 @ 我时触发
-    if (msgInfoBean.isGroupChat() && requireMentionInGroup && !msgInfoBean.isAtMe()) {
+    if (msgInfoBean.isGroupChat() && requireMentionInGroup && !isMentionedMe) {
         return;
     }
 
@@ -424,7 +425,7 @@ void onHandleMsg(Object msgInfoBean) {
         data.put("timestamp", msgInfoBean.getCreateTime());
         data.put("is_private", msgInfoBean.isPrivateChat());
         data.put("is_group", msgInfoBean.isGroupChat());
-        data.put("is_at_me", msgInfoBean.isAtMe());
+        data.put("is_at_me", isMentionedMe);
         List atUsers = msgInfoBean.getAtUserList();
         if (atUsers != null) {
             data.put("at_user_list", atUsers);
@@ -445,6 +446,37 @@ void onHandleMsg(Object msgInfoBean) {
     } catch (Exception e) {
         log("消息处理失败: " + e.getMessage());
     }
+}
+
+boolean resolveIsMentionedMe(Object msgInfoBean) {
+    try {
+        if (!msgInfoBean.isGroupChat()) {
+            return false;
+        }
+        if (msgInfoBean.isAtMe()) {
+            return true;
+        }
+
+        String loginWxid = getLoginWxid();
+        if (loginWxid == null || loginWxid.isEmpty()) {
+            return false;
+        }
+
+        List atUsers = msgInfoBean.getAtUserList();
+        if (atUsers == null || atUsers.isEmpty()) {
+            return false;
+        }
+
+        for (int i = 0; i < atUsers.size(); i++) {
+            Object item = atUsers.get(i);
+            if (item != null && loginWxid.equals(String.valueOf(item))) {
+                return true;
+            }
+        }
+    } catch (Exception e) {
+        log("解析 @我 状态失败: " + e.getMessage());
+    }
+    return false;
 }
 
 // ============================================================
