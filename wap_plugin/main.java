@@ -90,7 +90,7 @@ ConcurrentLinkedQueue pendingMessages = new ConcurrentLinkedQueue();
 
 void onLoad() {
     loadLocalConfig();
-    log("Moltbot 消息桥接器加载中...");
+    log("OpenClaw 消息桥接器加载中...");
     // 【安全】不要在日志中显示完整 URL，可能包含敏感信息
     log("服务器地址: " + maskUrl(SERVER_URL));
     log("allowFrom 配置将从服务端下发");
@@ -203,7 +203,7 @@ long parseLongOrDefault(String raw, long def) {
 }
 
 void onUnLoad() {
-    log("Moltbot 消息桥接器卸载中...");
+    log("OpenClaw 消息桥接器卸载中...");
     shouldReconnect = false;
 
     if (heartbeatThread != null) {
@@ -229,7 +229,7 @@ void onUnLoad() {
     }
 
     isConnected = false;
-    log("Moltbot 消息桥接器已卸载");
+    log("OpenClaw 消息桥接器已卸载");
 }
 
 // 【安全】URL 脱敏
