@@ -41,7 +41,7 @@
 | **连接认证** | Bearer Token | 插件 + 服务器 |
 | **入站控制** | allowFrom / groupAllowFrom（服务端下发） | 插件 |
 | **出站控制** | 私聊 allowFrom 验证 | 插件 |
-| **群聊门禁** | requireMentionInGroup（支持仅 @ 触发） | 插件 + 服务端 |
+| **群聊门禁** | groupPolicy/groupAllowChats/groupAllowFrom/requireMentionInGroup | 插件 + 服务端 |
 | **DM 策略** | pairing / allowlist / open / disabled | 服务端 |
 | **静默配对** | 未授权只登记 pairing 请求，不自动回消息 | 服务端 |
 | **速率限制** | 30条/分钟 | 插件 |

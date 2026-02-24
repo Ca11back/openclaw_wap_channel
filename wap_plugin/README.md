@@ -14,10 +14,12 @@
 
 - 插件连接成功后会接收服务端 `config`：
   - `allow_from`
+  - `group_policy`
+  - `group_allow_chats`
   - `group_allow_from`
   - `dm_policy`
   - `require_mention_in_group`
-- 群聊支持 `@` 门禁（服务端可要求必须 @ 才触发）。
+- 群聊按服务端规则本地过滤：`group_policy` -> `group_allow_chats` -> `group_allow_from` -> `@` 门禁。
 - pairing 模式支持静默拦截（未授权用户不自动收到回复）。
 - 插件默认同时转发私聊与群聊（不再默认仅私聊）。
 
@@ -48,6 +50,8 @@
   "type": "config",
   "data": {
     "allow_from": ["wxid_owner"],
+    "group_policy": "allowlist",
+    "group_allow_chats": ["123456789@chatroom"],
     "group_allow_from": ["wxid_owner"],
     "dm_policy": "pairing",
     "require_mention_in_group": true,

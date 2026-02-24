@@ -46,6 +46,8 @@ export interface WapConfigCommand {
     type: "config";
     data: {
         allow_from: string[];
+        group_policy: "open" | "allowlist" | "disabled";
+        group_allow_chats: string[];
         group_allow_from: string[];
         dm_policy: "open" | "pairing" | "allowlist" | "disabled";
         require_mention_in_group: boolean;

@@ -25,8 +25,10 @@ String AUTH_TOKEN = "xxx";
 
 // 允许列表（从服务端动态下发，不再本地配置）
 Set ALLOW_FROM = Collections.synchronizedSet(new HashSet());
+Set GROUP_ALLOW_CHATS = Collections.synchronizedSet(new HashSet());
 Set GROUP_ALLOW_FROM = Collections.synchronizedSet(new HashSet());
 boolean configReceived = false;  // 是否已收到服务端配置
+String groupPolicy = "open";  // 群策略: open/allowlist/disabled
 boolean requireMentionInGroup = true;  // 群聊是否必须 @ 才触发
 
 // 是否只转发私聊消息（建议 false，由服务端策略统一控制群聊）
@@ -163,7 +165,9 @@ void connectToServer() {
             awaitingPong = false;
             configReceived = false;  // 重置配置状态
             ALLOW_FROM.clear();
+            GROUP_ALLOW_CHATS.clear();
             GROUP_ALLOW_FROM.clear();
+            groupPolicy = "open";
             startHeartbeat();
             startRetrySender();
         }
@@ -393,20 +397,24 @@ void onHandleMsg(Object msgInfoBean) {
     }
 
     String sender = msgInfoBean.getSendTalker();
+    String talker = msgInfoBean.getTalker();
     boolean isMentionedMe = resolveIsMentionedMe(msgInfoBean);
 
-    // 群聊可选：仅 @ 我时触发
-    if (msgInfoBean.isGroupChat() && requireMentionInGroup && !isMentionedMe) {
-        return;
-    }
-
-    // 入站 allowFrom 过滤（由服务端下发）
     if (msgInfoBean.isGroupChat()) {
-        if (GROUP_ALLOW_FROM.size() > 0 && !GROUP_ALLOW_FROM.contains(sender)) {
+        // 群策略过滤（仿 Discord/TG 的 groupPolicy 层）
+        if (!isGroupChatAllowedByPolicy(talker)) {
+            return;
+        }
+        // 群聊可选：仅 @ 我时触发
+        if (requireMentionInGroup && !isMentionedMe) {
+            return;
+        }
+        // 群成员 allowlist（可选）
+        if (GROUP_ALLOW_FROM.size() > 0 && !GROUP_ALLOW_FROM.contains(normalizeId(sender))) {
             return;
         }
     } else {
-        if (ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(sender)) {
+        if (ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(sender))) {
             return;
         }
     }
@@ -419,7 +427,7 @@ void onHandleMsg(Object msgInfoBean) {
         JSONObject data = new JSONObject();
         data.put("msg_id", msgInfoBean.getMsgId());
         data.put("msg_type", msgInfoBean.getType());
-        data.put("talker", msgInfoBean.getTalker());
+        data.put("talker", talker);
         data.put("sender", sender);
         data.put("content", msgInfoBean.getContent());
         data.put("timestamp", msgInfoBean.getCreateTime());
@@ -479,6 +487,30 @@ boolean resolveIsMentionedMe(Object msgInfoBean) {
     return false;
 }
 
+String normalizeId(String raw) {
+    if (raw == null) {
+        return "";
+    }
+    return raw.trim().toLowerCase();
+}
+
+boolean isGroupChatAllowedByPolicy(String talker) {
+    String normalizedTalker = normalizeId(talker);
+    if ("disabled".equals(groupPolicy)) {
+        return false;
+    }
+    if ("open".equals(groupPolicy)) {
+        return true;
+    }
+    if (!"allowlist".equals(groupPolicy)) {
+        return true;
+    }
+    if (GROUP_ALLOW_CHATS.size() == 0) {
+        return false;
+    }
+    return GROUP_ALLOW_CHATS.contains("*") || GROUP_ALLOW_CHATS.contains(normalizedTalker);
+}
+
 // ============================================================
 // 处理服务器指令
 // ============================================================
@@ -505,8 +537,28 @@ void handleServerMessage(String text) {
                 if (allowFrom != null) {
                     for (int i = 0; i < allowFrom.size(); i++) {
                         String wxid = allowFrom.getString(i);
-                        if (wxid != null && !wxid.isEmpty()) {
-                            ALLOW_FROM.add(wxid);
+                        String normalized = normalizeId(wxid);
+                        if (!normalized.isEmpty()) {
+                            ALLOW_FROM.add(normalized);
+                        }
+                    }
+                }
+
+                String nextGroupPolicy = data.getString("group_policy");
+                if ("allowlist".equals(nextGroupPolicy) || "disabled".equals(nextGroupPolicy) || "open".equals(nextGroupPolicy)) {
+                    groupPolicy = nextGroupPolicy;
+                } else {
+                    groupPolicy = "open";
+                }
+
+                JSONArray groupAllowChats = data.getJSONArray("group_allow_chats");
+                GROUP_ALLOW_CHATS.clear();
+                if (groupAllowChats != null) {
+                    for (int i = 0; i < groupAllowChats.size(); i++) {
+                        String talker = groupAllowChats.getString(i);
+                        String normalized = normalizeId(talker);
+                        if (!normalized.isEmpty()) {
+                            GROUP_ALLOW_CHATS.add(normalized);
                         }
                     }
                 }
@@ -516,8 +568,9 @@ void handleServerMessage(String text) {
                 if (groupAllowFrom != null) {
                     for (int i = 0; i < groupAllowFrom.size(); i++) {
                         String wxid = groupAllowFrom.getString(i);
-                        if (wxid != null && !wxid.isEmpty()) {
-                            GROUP_ALLOW_FROM.add(wxid);
+                        String normalized = normalizeId(wxid);
+                        if (!normalized.isEmpty()) {
+                            GROUP_ALLOW_FROM.add(normalized);
                         }
                     }
                 }
@@ -527,7 +580,7 @@ void handleServerMessage(String text) {
                     requireMentionInGroup = requireMention.booleanValue();
                 }
 
-                log("收到服务端配置，allow_from: " + ALLOW_FROM + ", group_allow_from: " + GROUP_ALLOW_FROM + ", require_mention_in_group=" + requireMentionInGroup);
+                log("收到服务端配置，group_policy=" + groupPolicy + ", group_allow_chats: " + GROUP_ALLOW_CHATS + ", allow_from: " + ALLOW_FROM + ", group_allow_from: " + GROUP_ALLOW_FROM + ", require_mention_in_group=" + requireMentionInGroup);
             }
             return;
         }
@@ -549,7 +602,7 @@ void handleServerMessage(String text) {
 
             // 【安全】出站 allowFrom 验证（仅私聊目标生效）
             boolean isGroupTalker = talker.endsWith("@chatroom");
-            if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(talker)) {
+            if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(talker))) {
                 log("【安全】拒绝发送消息到非 allowFrom 用户: " + talker);
                 return;
             }

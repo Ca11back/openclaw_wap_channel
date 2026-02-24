@@ -5,12 +5,15 @@ export const DEFAULT_ACCOUNT_ID = "default" as const;
 export const DEFAULT_PORT = 8765;
 
 export type WapDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
+export type WapGroupPolicy = "open" | "allowlist" | "disabled";
 
 export interface WapAccountConfig {
   enabled?: boolean;
   name?: string;
   authToken?: string;
   allowFrom?: string[];
+  groupPolicy?: WapGroupPolicy;
+  groupAllowChats?: string[];
   groupAllowFrom?: string[];
   dmPolicy?: WapDmPolicy;
   requireMentionInGroup?: boolean;
@@ -43,6 +46,7 @@ function mergeAccountConfig(base: WapAccountConfig, next: WapAccountConfig): Wap
     ...base,
     ...next,
     allowFrom: next.allowFrom ?? base.allowFrom,
+    groupAllowChats: next.groupAllowChats ?? base.groupAllowChats,
     groupAllowFrom: next.groupAllowFrom ?? base.groupAllowFrom,
   };
 }
@@ -75,6 +79,8 @@ export function resolveWapAccount(cfg: OpenClawConfig, accountId?: string | null
     name: channelConfig.name,
     authToken: channelConfig.authToken,
     allowFrom: channelConfig.allowFrom,
+    groupPolicy: channelConfig.groupPolicy,
+    groupAllowChats: channelConfig.groupAllowChats,
     groupAllowFrom: channelConfig.groupAllowFrom,
     dmPolicy: channelConfig.dmPolicy,
     requireMentionInGroup: channelConfig.requireMentionInGroup,
@@ -93,6 +99,17 @@ export function resolveWapAccount(cfg: OpenClawConfig, accountId?: string | null
 export function resolveAllowFrom(config: WapAccountConfig): string[] {
   return (config.allowFrom ?? [])
     .map((entry) => String(entry).trim())
+    .filter((entry) => entry.length > 0);
+}
+
+export function resolveGroupPolicy(config: WapAccountConfig): WapGroupPolicy {
+  return config.groupPolicy ?? "open";
+}
+
+export function resolveGroupAllowChats(config: WapAccountConfig): string[] {
+  return (config.groupAllowChats ?? [])
+    .map((entry) => normalizeWapMessagingTarget(String(entry)))
+    .map((entry) => entry.trim().toLowerCase())
     .filter((entry) => entry.length > 0);
 }
 
@@ -167,6 +184,24 @@ export function isSenderAllowed(
   });
 }
 
+export function isGroupChatAllowed(
+  talker: string,
+  groupPolicy: WapGroupPolicy,
+  groupAllowChats: string[],
+): boolean {
+  if (groupPolicy === "disabled") {
+    return false;
+  }
+  if (groupPolicy === "open") {
+    return true;
+  }
+  if (groupAllowChats.length === 0) {
+    return false;
+  }
+  const normalizedTalker = normalizeWapMessagingTarget(talker).trim().toLowerCase();
+  return groupAllowChats.some((entry) => entry === "*" || entry === normalizedTalker);
+}
+
 export const wapChannelConfigSchema = {
   schema: {
     type: "object",
@@ -177,6 +212,11 @@ export const wapChannelConfigSchema = {
       port: { type: "number" },
       authToken: { type: "string" },
       allowFrom: { type: "array", items: { type: "string" } },
+      groupPolicy: {
+        type: "string",
+        enum: ["open", "allowlist", "disabled"],
+      },
+      groupAllowChats: { type: "array", items: { type: "string" } },
       groupAllowFrom: { type: "array", items: { type: "string" } },
       dmPolicy: {
         type: "string",
@@ -194,6 +234,11 @@ export const wapChannelConfigSchema = {
             name: { type: "string" },
             authToken: { type: "string" },
             allowFrom: { type: "array", items: { type: "string" } },
+            groupPolicy: {
+              type: "string",
+              enum: ["open", "allowlist", "disabled"],
+            },
+            groupAllowChats: { type: "array", items: { type: "string" } },
             groupAllowFrom: { type: "array", items: { type: "string" } },
             dmPolicy: {
               type: "string",
@@ -217,6 +262,12 @@ export const wapChannelConfigSchema = {
     },
     "channels.openclaw-channel-wap.requireMentionInGroup": {
       help: "When true, group messages trigger only when @mentioned.",
+    },
+    "channels.openclaw-channel-wap.groupPolicy": {
+      help: "Group policy: open (all groups), allowlist (groupAllowChats only), disabled.",
+    },
+    "channels.openclaw-channel-wap.groupAllowChats": {
+      help: "Allowed group talker IDs when groupPolicy=allowlist (supports '*').",
     },
     "channels.openclaw-channel-wap.silentPairing": {
       help: "When true, pairing requests are recorded silently without auto-reply.",

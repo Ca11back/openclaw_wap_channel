@@ -7,9 +7,12 @@ import {
   DEFAULT_ACCOUNT_ID,
   DEFAULT_PORT,
   getWapChannelConfig,
+  isGroupChatAllowed,
   isSenderAllowed,
   resolveAllowFrom,
+  resolveGroupAllowChats,
   resolveGroupAllowFrom,
+  resolveGroupPolicy,
   resolveWapAccount,
   type WapAccount,
 } from "./config.js";
@@ -133,6 +136,8 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
   });
 
   const allowFrom = resolveAllowFrom(account.config);
+  const groupPolicy = resolveGroupPolicy(account.config);
+  const groupAllowChats = resolveGroupAllowChats(account.config);
   const groupAllowFrom = resolveGroupAllowFrom(account.config);
   const requireMentionInGroup = account.config.requireMentionInGroup ?? true;
   const silentPairing = account.config.silentPairing ?? true;
@@ -142,6 +147,8 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
       type: "config",
       data: {
         allow_from: allowFrom,
+        group_policy: groupPolicy,
+        group_allow_chats: groupAllowChats,
         group_allow_from: groupAllowFrom,
         dm_policy: account.config.dmPolicy ?? "pairing",
         require_mention_in_group: requireMentionInGroup,
@@ -224,6 +231,8 @@ async function processWapInboundMessage(params: {
   const chatType = isGroup ? "group" : "direct";
   const dmPolicy = client.account.config.dmPolicy ?? "pairing";
   const allowFrom = resolveAllowFrom(client.account.config);
+  const groupPolicy = resolveGroupPolicy(client.account.config);
+  const groupAllowChats = resolveGroupAllowChats(client.account.config);
   const groupAllowFrom = resolveGroupAllowFrom(client.account.config);
   const storeAllowFrom = isGroup
     ? []
@@ -238,6 +247,12 @@ async function processWapInboundMessage(params: {
   );
 
   if (isGroup) {
+    if (!isGroupChatAllowed(msgData.talker, groupPolicy, groupAllowChats)) {
+      api.logger.debug(
+        `WAP drop group message from ${msgData.sender}: group ${msgData.talker} blocked by policy=${groupPolicy}`,
+      );
+      return;
+    }
     const requireMention = client.account.config.requireMentionInGroup ?? true;
     if (requireMention && msgData.is_at_me !== true) {
       api.logger.debug(`WAP drop group message from ${msgData.sender}: mention required`);

@@ -3,6 +3,8 @@ import {
   CHANNEL_ID,
   DEFAULT_ACCOUNT_ID,
   hasExplicitAccount,
+  resolveGroupAllowChats,
+  resolveGroupPolicy,
   listWapAccountIds,
   looksLikeWapTargetId,
   normalizeWapMessagingTarget,
@@ -63,6 +65,8 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
         configured: getAccountClientCount(account.accountId) > 0,
         connectedClients: getAccountClientCount(account.accountId),
         dmPolicy: account.config.dmPolicy ?? "pairing",
+        groupPolicy: resolveGroupPolicy(account.config),
+        groupAllowChats: resolveGroupAllowChats(account.config),
         allowFrom,
       };
     },
