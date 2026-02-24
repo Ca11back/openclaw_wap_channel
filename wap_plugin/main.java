@@ -642,6 +642,17 @@ boolean looksLikeWxid(String raw) {
     return value.matches("^[A-Za-z][A-Za-z0-9._-]{2,}$");
 }
 
+boolean looksLikeExplicitWxid(String raw) {
+    if (raw == null) {
+        return false;
+    }
+    String value = raw.trim();
+    if (value.isEmpty()) {
+        return false;
+    }
+    return value.startsWith("wxid_");
+}
+
 String normalizeTargetText(String raw) {
     if (raw == null) {
         return "";
@@ -658,7 +669,8 @@ String getFriendWxidByKeyword(String keywordRaw) {
     if (keyword.isEmpty()) {
         return null;
     }
-    if (looksLikeWxid(keyword)) {
+    // friend:/remark:/nickname: 语义上优先解析联系人，只有显式 wxid_ 才直接放行
+    if (looksLikeExplicitWxid(keyword)) {
         return keyword;
     }
 
@@ -675,8 +687,12 @@ String getFriendWxidByKeyword(String keywordRaw) {
 
     String exactKey = normalizeNameKey(keyword);
     String fuzzyKey = exactKey;
-    List exactMatches = new java.util.ArrayList();
-    List fuzzyMatches = new java.util.ArrayList();
+    List remarkExactMatches = new java.util.ArrayList();
+    List nicknameExactMatches = new java.util.ArrayList();
+    List idExactMatches = new java.util.ArrayList();
+    List remarkFuzzyMatches = new java.util.ArrayList();
+    List nicknameFuzzyMatches = new java.util.ArrayList();
+    List idFuzzyMatches = new java.util.ArrayList();
 
     for (int i = 0; i < friends.size(); i++) {
         Object item = friends.get(i);
@@ -693,39 +709,55 @@ String getFriendWxidByKeyword(String keywordRaw) {
         String nicknameKey = normalizeNameKey(nickname);
         String aliasKey = normalizeNameKey(alias);
 
-        boolean exact =
-            (!wxidKey.isEmpty() && wxidKey.equals(exactKey)) ||
-            (!remarkKey.isEmpty() && remarkKey.equals(exactKey)) ||
-            (!nicknameKey.isEmpty() && nicknameKey.equals(exactKey)) ||
-            (!aliasKey.isEmpty() && aliasKey.equals(exactKey));
-        if (exact) {
-            exactMatches.add(wxid);
+        if (!remarkKey.isEmpty() && remarkKey.equals(exactKey)) {
+            remarkExactMatches.add(wxid);
+            continue;
+        }
+        if ((!nicknameKey.isEmpty() && nicknameKey.equals(exactKey)) || (!aliasKey.isEmpty() && aliasKey.equals(exactKey))) {
+            nicknameExactMatches.add(wxid);
+            continue;
+        }
+        if (!wxidKey.isEmpty() && wxidKey.equals(exactKey)) {
+            idExactMatches.add(wxid);
             continue;
         }
 
-        boolean fuzzy =
-            (!remarkKey.isEmpty() && remarkKey.indexOf(fuzzyKey) >= 0) ||
-            (!nicknameKey.isEmpty() && nicknameKey.indexOf(fuzzyKey) >= 0) ||
-            (!aliasKey.isEmpty() && aliasKey.indexOf(fuzzyKey) >= 0);
-        if (fuzzy) {
-            fuzzyMatches.add(wxid);
+        if (!remarkKey.isEmpty() && remarkKey.indexOf(fuzzyKey) >= 0) {
+            remarkFuzzyMatches.add(wxid);
+            continue;
+        }
+        if ((!nicknameKey.isEmpty() && nicknameKey.indexOf(fuzzyKey) >= 0) || (!aliasKey.isEmpty() && aliasKey.indexOf(fuzzyKey) >= 0)) {
+            nicknameFuzzyMatches.add(wxid);
+            continue;
+        }
+        if (!wxidKey.isEmpty() && wxidKey.indexOf(fuzzyKey) >= 0) {
+            idFuzzyMatches.add(wxid);
         }
     }
 
-    if (exactMatches.size() == 1) {
-        return String.valueOf(exactMatches.get(0));
-    }
-    if (exactMatches.size() > 1) {
-        log("好友目标解析失败：存在多个精确匹配，请改用 wxid。keyword=" + keyword + ", matches=" + exactMatches.size());
+    String resolved = pickSingleFriendMatch(remarkExactMatches, "备注精确匹配", keyword);
+    if (resolved != null) return resolved;
+    resolved = pickSingleFriendMatch(nicknameExactMatches, "昵称精确匹配", keyword);
+    if (resolved != null) return resolved;
+    resolved = pickSingleFriendMatch(idExactMatches, "ID精确匹配", keyword);
+    if (resolved != null) return resolved;
+    resolved = pickSingleFriendMatch(remarkFuzzyMatches, "备注模糊匹配", keyword);
+    if (resolved != null) return resolved;
+    resolved = pickSingleFriendMatch(nicknameFuzzyMatches, "昵称模糊匹配", keyword);
+    if (resolved != null) return resolved;
+    resolved = pickSingleFriendMatch(idFuzzyMatches, "ID模糊匹配", keyword);
+    if (resolved != null) return resolved;
+    return null;
+}
+
+String pickSingleFriendMatch(List matches, String stage, String keyword) {
+    if (matches == null || matches.size() == 0) {
         return null;
     }
-    if (fuzzyMatches.size() == 1) {
-        return String.valueOf(fuzzyMatches.get(0));
+    if (matches.size() == 1) {
+        return String.valueOf(matches.get(0));
     }
-    if (fuzzyMatches.size() > 1) {
-        log("好友目标解析失败：存在多个模糊匹配，请改用 wxid。keyword=" + keyword + ", matches=" + fuzzyMatches.size());
-        return null;
-    }
+    log("好友目标解析失败：" + stage + "存在多个结果，请改用 wxid。keyword=" + keyword + ", matches=" + matches.size());
     return null;
 }
 
@@ -805,6 +837,33 @@ String nullSafeInvokeString(Object target, String methodName) {
     }
 }
 
+boolean isFriendWxid(String wxid) {
+    if (wxid == null || wxid.trim().isEmpty()) {
+        return false;
+    }
+    List friends = null;
+    try {
+        friends = getFriendList();
+    } catch (Exception e) {
+        log("获取好友列表失败: " + e.getMessage());
+        return false;
+    }
+    if (friends == null || friends.isEmpty()) {
+        return false;
+    }
+
+    String target = normalizeNameKey(wxid);
+    for (int i = 0; i < friends.size(); i++) {
+        Object item = friends.get(i);
+        if (item == null) continue;
+        String friendWxid = normalizeNameKey(nullSafeInvokeString(item, "getWxid"));
+        if (!friendWxid.isEmpty() && friendWxid.equals(target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 String resolveOutboundTalker(String rawTalker) {
     String talker = normalizeTargetText(rawTalker).trim();
     if (talker.isEmpty()) {
@@ -823,10 +882,11 @@ String resolveOutboundTalker(String rawTalker) {
         return talker.substring(talker.indexOf(":") + 1).trim();
     }
 
-    if (looksLikeGroupTalker(talker) || looksLikeWxid(talker)) {
+    if (looksLikeGroupTalker(talker)) {
         return talker;
     }
 
+    // 无前缀时先做名称解析，再回退到 raw wxid
     String groupMatch = getGroupTalkerByKeyword(talker);
     String friendMatch = getFriendWxidByKeyword(talker);
     if (groupMatch != null && friendMatch != null) {
@@ -839,6 +899,9 @@ String resolveOutboundTalker(String rawTalker) {
     if (friendMatch != null) {
         return friendMatch;
     }
+    if (looksLikeWxid(talker)) {
+        return talker;
+    }
     return null;
 }
 
@@ -850,7 +913,8 @@ String resolveGroupMemberWxid(String groupTalker, String memberKeyRaw) {
     if (startsWithIgnoreCase(memberKey, "wxid:") || startsWithIgnoreCase(memberKey, "id:")) {
         memberKey = memberKey.substring(memberKey.indexOf(":") + 1).trim();
     }
-    if (looksLikeWxid(memberKey)) {
+    // 群 @ 模板中也仅显式 wxid_ 直接放行，避免昵称误判为 wxid
+    if (looksLikeExplicitWxid(memberKey)) {
         return memberKey;
     }
 
@@ -1033,6 +1097,10 @@ void handleServerMessage(String text) {
 
             // 【安全】出站 allowFrom 验证（仅私聊目标生效）
             boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
+            if (!isGroupTalker && !isFriendWxid(resolvedTalker)) {
+                log("【安全】拒绝发送私聊：目标不是当前账号好友: " + resolvedTalker);
+                return;
+            }
             if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(resolvedTalker))) {
                 log("【安全】拒绝发送消息到非 allowFrom 用户: " + resolvedTalker);
                 return;

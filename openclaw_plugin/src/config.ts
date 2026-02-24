@@ -155,7 +155,11 @@ export function looksLikeWapTargetId(raw: string): boolean {
   if (normalized.endsWith("@chatroom")) {
     return true;
   }
-  return /^wxid_[A-Za-z0-9_-]+$/.test(normalized) || /^[A-Za-z][A-Za-z0-9._-]{2,}$/.test(normalized);
+  if (/^wxid_[A-Za-z0-9_-]+$/.test(normalized)) {
+    return true;
+  }
+  // Allow plain names (e.g. short aliases like "HH") and resolve them on WAuxiliary side.
+  return normalized.length > 0;
 }
 
 export function resolveWapOutboundTarget(params: {
