@@ -59,6 +59,14 @@ openclaw plugins install openclaw-channel-wap
 | `silentPairing` | pairing 模式下是否静默拦截（不自动回配对码） |
 | `accounts.<id>.*` | 账户级配置（覆盖全局字段） |
 
+## 发送目标（对齐 TG/Discord 使用体验）
+
+- 直接 ID：`wxid_xxx` / `123456789@chatroom`
+- 按群名：`group:产品讨论群`
+- 按好友备注/昵称：`friend:张三`（也支持 `remark:` / `nickname:` / `name:`）
+
+> 名称解析在 WAuxiliary 端完成；若同名冲突会拒绝发送并要求改用 ID。
+
 ## 协议变化（3.0）
 
 - 上行消息新增 `is_at_me`、`at_user_list`。

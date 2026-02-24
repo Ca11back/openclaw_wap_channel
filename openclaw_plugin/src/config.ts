@@ -136,6 +136,22 @@ export function looksLikeWapTargetId(raw: string): boolean {
   if (!normalized) {
     return false;
   }
+  const lower = normalized.toLowerCase();
+  if (
+    lower.startsWith("group:") ||
+    lower.startsWith("room:") ||
+    lower.startsWith("chatroom:") ||
+    lower.startsWith("friend:") ||
+    lower.startsWith("user:") ||
+    lower.startsWith("contact:") ||
+    lower.startsWith("remark:") ||
+    lower.startsWith("nickname:") ||
+    lower.startsWith("name:") ||
+    lower.startsWith("id:") ||
+    lower.startsWith("wxid:")
+  ) {
+    return true;
+  }
   if (normalized.endsWith("@chatroom")) {
     return true;
   }
@@ -164,7 +180,7 @@ export function resolveWapOutboundTarget(params: {
   return {
     ok: false,
     error: new Error(
-      `Missing WeChat target. Provide a target like ${mode === "explicit" ? "--to <wxid|chatroom_talker>" : "wxid/chatroom_talker"}.`,
+      `Missing WeChat target. Provide ${mode === "explicit" ? "--to <wxid|group:群名|friend:备注>" : "wxid/group:群名/friend:备注"}.`,
     ),
   };
 }

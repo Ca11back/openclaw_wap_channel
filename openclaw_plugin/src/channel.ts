@@ -97,7 +97,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     normalizeTarget: normalizeWapMessagingTarget,
     targetResolver: {
       looksLikeId: looksLikeWapTargetId,
-      hint: "<wxid|chatroom_talker>",
+      hint: "<wxid|chatroom_talker|group:群名|friend:备注>",
     },
   },
   outbound: {

@@ -603,6 +603,322 @@ String normalizeId(String raw) {
     return raw.trim().toLowerCase();
 }
 
+String normalizeNameKey(String raw) {
+    if (raw == null) {
+        return "";
+    }
+    return raw.trim().toLowerCase();
+}
+
+boolean startsWithIgnoreCase(String raw, String prefix) {
+    if (raw == null || prefix == null) {
+        return false;
+    }
+    return raw.regionMatches(true, 0, prefix, 0, prefix.length());
+}
+
+String stripPrefixIgnoreCase(String raw, String prefix) {
+    if (!startsWithIgnoreCase(raw, prefix)) {
+        return raw;
+    }
+    return raw.substring(prefix.length()).trim();
+}
+
+boolean looksLikeGroupTalker(String raw) {
+    return raw != null && raw.endsWith("@chatroom");
+}
+
+boolean looksLikeWxid(String raw) {
+    if (raw == null) {
+        return false;
+    }
+    String value = raw.trim();
+    if (value.isEmpty()) {
+        return false;
+    }
+    if (value.startsWith("wxid_")) {
+        return true;
+    }
+    return value.matches("^[A-Za-z][A-Za-z0-9._-]{2,}$");
+}
+
+String normalizeTargetText(String raw) {
+    if (raw == null) {
+        return "";
+    }
+    String value = raw.trim();
+    if (startsWithIgnoreCase(value, "wechat:")) return stripPrefixIgnoreCase(value, "wechat:");
+    if (startsWithIgnoreCase(value, "wx:")) return stripPrefixIgnoreCase(value, "wx:");
+    if (startsWithIgnoreCase(value, "wap:")) return stripPrefixIgnoreCase(value, "wap:");
+    return value;
+}
+
+String getFriendWxidByKeyword(String keywordRaw) {
+    String keyword = normalizeTargetText(keywordRaw).trim();
+    if (keyword.isEmpty()) {
+        return null;
+    }
+    if (looksLikeWxid(keyword)) {
+        return keyword;
+    }
+
+    List friends = null;
+    try {
+        friends = getFriendList();
+    } catch (Exception e) {
+        log("获取好友列表失败: " + e.getMessage());
+        return null;
+    }
+    if (friends == null || friends.isEmpty()) {
+        return null;
+    }
+
+    String exactKey = normalizeNameKey(keyword);
+    String fuzzyKey = exactKey;
+    List exactMatches = new java.util.ArrayList();
+    List fuzzyMatches = new java.util.ArrayList();
+
+    for (int i = 0; i < friends.size(); i++) {
+        Object item = friends.get(i);
+        if (item == null) {
+            continue;
+        }
+        String wxid = nullSafeInvokeString(item, "getWxid");
+        String remark = nullSafeInvokeString(item, "getRemark");
+        String nickname = nullSafeInvokeString(item, "getNickname");
+        String alias = nullSafeInvokeString(item, "getAlias");
+
+        String wxidKey = normalizeNameKey(wxid);
+        String remarkKey = normalizeNameKey(remark);
+        String nicknameKey = normalizeNameKey(nickname);
+        String aliasKey = normalizeNameKey(alias);
+
+        boolean exact =
+            (!wxidKey.isEmpty() && wxidKey.equals(exactKey)) ||
+            (!remarkKey.isEmpty() && remarkKey.equals(exactKey)) ||
+            (!nicknameKey.isEmpty() && nicknameKey.equals(exactKey)) ||
+            (!aliasKey.isEmpty() && aliasKey.equals(exactKey));
+        if (exact) {
+            exactMatches.add(wxid);
+            continue;
+        }
+
+        boolean fuzzy =
+            (!remarkKey.isEmpty() && remarkKey.indexOf(fuzzyKey) >= 0) ||
+            (!nicknameKey.isEmpty() && nicknameKey.indexOf(fuzzyKey) >= 0) ||
+            (!aliasKey.isEmpty() && aliasKey.indexOf(fuzzyKey) >= 0);
+        if (fuzzy) {
+            fuzzyMatches.add(wxid);
+        }
+    }
+
+    if (exactMatches.size() == 1) {
+        return String.valueOf(exactMatches.get(0));
+    }
+    if (exactMatches.size() > 1) {
+        log("好友目标解析失败：存在多个精确匹配，请改用 wxid。keyword=" + keyword + ", matches=" + exactMatches.size());
+        return null;
+    }
+    if (fuzzyMatches.size() == 1) {
+        return String.valueOf(fuzzyMatches.get(0));
+    }
+    if (fuzzyMatches.size() > 1) {
+        log("好友目标解析失败：存在多个模糊匹配，请改用 wxid。keyword=" + keyword + ", matches=" + fuzzyMatches.size());
+        return null;
+    }
+    return null;
+}
+
+String getGroupTalkerByKeyword(String keywordRaw) {
+    String keyword = normalizeTargetText(keywordRaw).trim();
+    if (keyword.isEmpty()) {
+        return null;
+    }
+    if (looksLikeGroupTalker(keyword)) {
+        return keyword;
+    }
+
+    List groups = null;
+    try {
+        groups = getGroupList();
+    } catch (Exception e) {
+        log("获取群列表失败: " + e.getMessage());
+        return null;
+    }
+    if (groups == null || groups.isEmpty()) {
+        return null;
+    }
+
+    String exactKey = normalizeNameKey(keyword);
+    List exactMatches = new java.util.ArrayList();
+    List fuzzyMatches = new java.util.ArrayList();
+
+    for (int i = 0; i < groups.size(); i++) {
+        Object item = groups.get(i);
+        if (item == null) {
+            continue;
+        }
+        String roomId = nullSafeInvokeString(item, "getRoomId");
+        String groupName = nullSafeInvokeString(item, "getName");
+        String roomIdKey = normalizeNameKey(roomId);
+        String groupNameKey = normalizeNameKey(groupName);
+
+        if ((!roomIdKey.isEmpty() && roomIdKey.equals(exactKey)) || (!groupNameKey.isEmpty() && groupNameKey.equals(exactKey))) {
+            exactMatches.add(roomId);
+            continue;
+        }
+        if (!groupNameKey.isEmpty() && groupNameKey.indexOf(exactKey) >= 0) {
+            fuzzyMatches.add(roomId);
+        }
+    }
+
+    if (exactMatches.size() == 1) {
+        return String.valueOf(exactMatches.get(0));
+    }
+    if (exactMatches.size() > 1) {
+        log("群目标解析失败：存在多个精确匹配，请改用 roomId。keyword=" + keyword + ", matches=" + exactMatches.size());
+        return null;
+    }
+    if (fuzzyMatches.size() == 1) {
+        return String.valueOf(fuzzyMatches.get(0));
+    }
+    if (fuzzyMatches.size() > 1) {
+        log("群目标解析失败：存在多个模糊匹配，请改用 roomId。keyword=" + keyword + ", matches=" + fuzzyMatches.size());
+        return null;
+    }
+    return null;
+}
+
+String nullSafeInvokeString(Object target, String methodName) {
+    try {
+        if (target == null || methodName == null || methodName.isEmpty()) {
+            return "";
+        }
+        java.lang.reflect.Method m = target.getClass().getMethod(methodName, new Class[0]);
+        Object value = m.invoke(target, new Object[0]);
+        if (value == null) {
+            return "";
+        }
+        return String.valueOf(value).trim();
+    } catch (Exception e) {
+        return "";
+    }
+}
+
+String resolveOutboundTalker(String rawTalker) {
+    String talker = normalizeTargetText(rawTalker).trim();
+    if (talker.isEmpty()) {
+        return null;
+    }
+
+    if (startsWithIgnoreCase(talker, "group:") || startsWithIgnoreCase(talker, "room:") || startsWithIgnoreCase(talker, "chatroom:")) {
+        String keyword = talker.substring(talker.indexOf(":") + 1).trim();
+        return getGroupTalkerByKeyword(keyword);
+    }
+    if (startsWithIgnoreCase(talker, "friend:") || startsWithIgnoreCase(talker, "user:") || startsWithIgnoreCase(talker, "contact:") || startsWithIgnoreCase(talker, "remark:") || startsWithIgnoreCase(talker, "nickname:") || startsWithIgnoreCase(talker, "name:")) {
+        String keyword = talker.substring(talker.indexOf(":") + 1).trim();
+        return getFriendWxidByKeyword(keyword);
+    }
+    if (startsWithIgnoreCase(talker, "id:") || startsWithIgnoreCase(talker, "wxid:")) {
+        return talker.substring(talker.indexOf(":") + 1).trim();
+    }
+
+    if (looksLikeGroupTalker(talker) || looksLikeWxid(talker)) {
+        return talker;
+    }
+
+    String groupMatch = getGroupTalkerByKeyword(talker);
+    String friendMatch = getFriendWxidByKeyword(talker);
+    if (groupMatch != null && friendMatch != null) {
+        log("目标解析失败：关键字同时命中好友与群，请添加前缀 group:/friend: keyword=" + talker);
+        return null;
+    }
+    if (groupMatch != null) {
+        return groupMatch;
+    }
+    if (friendMatch != null) {
+        return friendMatch;
+    }
+    return null;
+}
+
+String resolveGroupMemberWxid(String groupTalker, String memberKeyRaw) {
+    String memberKey = normalizeTargetText(memberKeyRaw).trim();
+    if (memberKey.isEmpty()) {
+        return null;
+    }
+    if (startsWithIgnoreCase(memberKey, "wxid:") || startsWithIgnoreCase(memberKey, "id:")) {
+        memberKey = memberKey.substring(memberKey.indexOf(":") + 1).trim();
+    }
+    if (looksLikeWxid(memberKey)) {
+        return memberKey;
+    }
+
+    List members = null;
+    try {
+        members = getGroupMemberList(groupTalker);
+    } catch (Exception e) {
+        log("获取群成员失败: " + e.getMessage());
+        return null;
+    }
+    if (members == null || members.isEmpty()) {
+        return null;
+    }
+
+    String key = normalizeNameKey(memberKey);
+    List exactMatches = new java.util.ArrayList();
+    List fuzzyMatches = new java.util.ArrayList();
+    for (int i = 0; i < members.size(); i++) {
+        Object item = members.get(i);
+        if (item == null) continue;
+        String wxid = String.valueOf(item).trim();
+        if (wxid.isEmpty()) continue;
+        String wxidKey = normalizeNameKey(wxid);
+        String groupName = normalizeNameKey(getFriendName(wxid, groupTalker));
+        String globalName = normalizeNameKey(getFriendName(wxid));
+
+        if (wxidKey.equals(key) || (!groupName.isEmpty() && groupName.equals(key)) || (!globalName.isEmpty() && globalName.equals(key))) {
+            exactMatches.add(wxid);
+            continue;
+        }
+        if ((!groupName.isEmpty() && groupName.indexOf(key) >= 0) || (!globalName.isEmpty() && globalName.indexOf(key) >= 0)) {
+            fuzzyMatches.add(wxid);
+        }
+    }
+
+    if (exactMatches.size() == 1) return String.valueOf(exactMatches.get(0));
+    if (exactMatches.size() > 1) {
+        log("群成员解析失败：存在多个精确匹配，请改用 wxid。member=" + memberKey + ", matches=" + exactMatches.size());
+        return null;
+    }
+    if (fuzzyMatches.size() == 1) return String.valueOf(fuzzyMatches.get(0));
+    if (fuzzyMatches.size() > 1) {
+        log("群成员解析失败：存在多个模糊匹配，请改用 wxid。member=" + memberKey + ", matches=" + fuzzyMatches.size());
+        return null;
+    }
+    return null;
+}
+
+String renderGroupMentionTemplates(String groupTalker, String content) {
+    if (content == null || content.indexOf("{{at:") < 0) {
+        return content;
+    }
+    String result = content;
+    int guard = 0;
+    while (guard < 32) {
+        guard++;
+        int start = result.indexOf("{{at:");
+        if (start < 0) break;
+        int end = result.indexOf("}}", start);
+        if (end < 0) break;
+        String token = result.substring(start + 5, end).trim();
+        String resolvedWxid = resolveGroupMemberWxid(groupTalker, token);
+        String replacement = resolvedWxid != null ? "[AtWx=" + resolvedWxid + "]" : result.substring(start, end + 2);
+        result = result.substring(0, start) + replacement + result.substring(end + 2);
+    }
+    return result;
+}
+
 boolean isGroupChatAllowedByPolicy(String talker) {
     String normalizedTalker = normalizeId(talker);
     if ("disabled".equals(groupPolicy)) {
@@ -709,10 +1025,16 @@ void handleServerMessage(String text) {
                 return;
             }
 
+            String resolvedTalker = resolveOutboundTalker(talker);
+            if (resolvedTalker == null || resolvedTalker.isEmpty()) {
+                log("send_text 目标解析失败，无法发送: " + talker);
+                return;
+            }
+
             // 【安全】出站 allowFrom 验证（仅私聊目标生效）
-            boolean isGroupTalker = talker.endsWith("@chatroom");
-            if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(talker))) {
-                log("【安全】拒绝发送消息到非 allowFrom 用户: " + talker);
+            boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
+            if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(resolvedTalker))) {
+                log("【安全】拒绝发送消息到非 allowFrom 用户: " + resolvedTalker);
                 return;
             }
 
@@ -729,12 +1051,13 @@ void handleServerMessage(String text) {
                 return;
             }
 
-            sendText(talker, content);
-            String preview = content;
+            String outboundContent = isGroupTalker ? renderGroupMentionTemplates(resolvedTalker, content) : content;
+            sendText(resolvedTalker, outboundContent);
+            String preview = outboundContent;
             if (preview.length() > 50) {
                 preview = preview.substring(0, 50) + "...";
             }
-            log("已发送消息到 " + talker + ": " + preview);
+            log("已发送消息到 " + resolvedTalker + ": " + preview);
             return;
         }
 
