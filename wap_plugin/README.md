@@ -2,6 +2,9 @@
 
 通过 WebSocket 把微信消息转发到 OpenClaw WAP Channel，并接收 AI 回复。
 
+> 重要：本 README 仅描述客户端插件配置。必须与仓库主 README 和 `openclaw_plugin/` 配套使用：  
+> 请先看 [`../README.md`](../README.md)，确认服务端已按 [`../openclaw_plugin/README.md`](../openclaw_plugin/README.md) 正确部署后再配置本文。
+
 ## 安装
 
 1. 修改同级 `config.yml`：

@@ -2,6 +2,9 @@
 
 OpenClaw 的微信消息通道插件，通过 WAuxiliary 插件接入微信消息。
 
+> 重要：本 README 仅描述服务端 Channel 配置。必须与仓库主 README 和 `wap_plugin/` 配套使用：  
+> 先看 [`../README.md`](../README.md)，再按本文配置服务端，最后按 [`../wap_plugin/README.md`](../wap_plugin/README.md) 配置客户端。
+
 ## 安装
 
 ```bash
@@ -65,7 +68,7 @@ openclaw plugins install openclaw-channel-wap
 - 按群名：`group:产品讨论群`
 - 按好友备注/昵称：`friend:张三`（也支持 `remark:` / `nickname:` / `name:`）
 
-> 名称解析在 WAuxiliary 端完成；若同名冲突会拒绝发送并要求改用 ID。
+> 名称解析发生在 WAuxiliary 客户端（`wap_plugin`）侧；若同名冲突会拒绝发送并要求改用 ID。
 
 ## 协议变化（3.0）
 
