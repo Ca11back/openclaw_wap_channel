@@ -4,11 +4,31 @@
 
 ## 安装
 
-1. 修改 `main.java` 顶部常量：
-   - `SERVER_URL`
-   - `AUTH_TOKEN`
+1. 修改同级 `config.yml`：
+   - `server_url`
+   - `auth_token`
 2. 把 `wap_plugin` 目录复制到 WAuxiliary 插件目录
 3. 在 WAuxiliary 中启用插件
+
+## 本地配置
+
+插件会在启动时读取 `pluginDir/config.yml`（同级目录）。  
+WAuxiliary 没有内置 YAML 配置 API，这里由插件自行读取并解析键值。
+
+```yaml
+server_url: "ws(s)://xxx.xxx.xxx:xxx/ws"
+auth_token: "xxx"
+heartbeat_interval_ms: 20000
+max_missed_heartbeats: 2
+send_rate_limit_per_min: 30
+max_send_retries: 3
+retry_delay_ms: 2000
+max_pending_messages: 5
+message_ttl_ms: 30000
+```
+
+- 上面这些是“非服务端下发 + 非重连”配置。
+- 重连相关参数仍在 `main.java` 内固定（`RECONNECT_DELAY_*`）。
 
 ## 运行机制（3.0）
 

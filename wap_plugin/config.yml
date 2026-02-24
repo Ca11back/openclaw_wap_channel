@@ -1,0 +1,15 @@
+# Local runtime config for WAuxiliary bridge plugin.
+# Path: <pluginDir>/config.yml
+
+# Required
+server_url: "ws(s)://xxx.xxx.xxx:xxx/ws"
+auth_token: "xxx"
+
+# Optional (non-reconnect settings)
+heartbeat_interval_ms: 20000
+max_missed_heartbeats: 2
+send_rate_limit_per_min: 30
+max_send_retries: 3
+retry_delay_ms: 2000
+max_pending_messages: 5
+message_ttl_ms: 30000

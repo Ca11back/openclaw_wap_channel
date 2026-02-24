@@ -12,16 +12,21 @@ import java.util.List;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.Collections;
+import java.io.File;
+import java.io.FileReader;
+import java.io.BufferedReader;
 
 // ============================================================
 // 配置区域 - 请根据实际情况修改
 // ============================================================
 
 // 服务器 WebSocket 地址
-String SERVER_URL = "ws(s)://xxx.xxx.xxx:xxx/ws";
+String DEFAULT_SERVER_URL = "ws(s)://xxx.xxx.xxx:xxx/ws";
+String SERVER_URL = DEFAULT_SERVER_URL;
 
 // 认证 Token（与服务端 WAP_AUTH_TOKEN 保持一致）
-String AUTH_TOKEN = "xxx";
+String DEFAULT_AUTH_TOKEN = "xxx";
+String AUTH_TOKEN = DEFAULT_AUTH_TOKEN;
 
 // 允许列表（从服务端动态下发，不再本地配置）
 Set ALLOW_FROM = Collections.synchronizedSet(new HashSet());
@@ -31,17 +36,17 @@ boolean configReceived = false;  // 是否已收到服务端配置
 String groupPolicy = "open";  // 群策略: open/allowlist/disabled
 boolean requireMentionInGroup = true;  // 群聊是否必须 @ 才触发
 
-// 是否只转发私聊消息（建议 false，由服务端策略统一控制群聊）
-boolean PRIVATE_ONLY = false;
-
 // 心跳间隔（毫秒）
-long HEARTBEAT_INTERVAL = 20000;
+long DEFAULT_HEARTBEAT_INTERVAL = 20000;
+long HEARTBEAT_INTERVAL = DEFAULT_HEARTBEAT_INTERVAL;
 
 // 心跳容错配置
-int MAX_MISSED_HEARTBEATS = 2;  // 连续 N 次心跳失败才视为断联（容忍 40 秒网络波动）
+int DEFAULT_MAX_MISSED_HEARTBEATS = 2;  // 连续 N 次心跳失败才视为断联（容忍 40 秒网络波动）
+int MAX_MISSED_HEARTBEATS = DEFAULT_MAX_MISSED_HEARTBEATS;
 
 // 【安全】发送速率限制（每分钟最多发送的消息数）
-int SEND_RATE_LIMIT = 30;
+int DEFAULT_SEND_RATE_LIMIT = 30;
+int SEND_RATE_LIMIT = DEFAULT_SEND_RATE_LIMIT;
 
 // 重连延迟配置（毫秒）
 long RECONNECT_DELAY_FIRST = 0;        // 第一次断开后立即重试
@@ -49,10 +54,14 @@ long RECONNECT_DELAY_SECOND = 30000;   // 第二次重试延迟 30 秒
 long RECONNECT_DELAY_DEFAULT = 60000;  // 之后每次间隔 1 分钟
 
 // 消息重试配置
-int MAX_SEND_RETRIES = 3;              // 最大重试次数
-long RETRY_DELAY_MS = 2000;            // 重试间隔（毫秒）
-int MAX_PENDING_MESSAGES = 5;          // 最大待发送队列长度
-long MESSAGE_TTL_MS = 30000;           // 消息过期时间（30秒），超过则丢弃
+int DEFAULT_MAX_SEND_RETRIES = 3;              // 最大重试次数
+long DEFAULT_RETRY_DELAY_MS = 2000;            // 重试间隔（毫秒）
+int DEFAULT_MAX_PENDING_MESSAGES = 5;          // 最大待发送队列长度
+long DEFAULT_MESSAGE_TTL_MS = 30000;           // 消息过期时间（30秒），超过则丢弃
+int MAX_SEND_RETRIES = DEFAULT_MAX_SEND_RETRIES;
+long RETRY_DELAY_MS = DEFAULT_RETRY_DELAY_MS;
+int MAX_PENDING_MESSAGES = DEFAULT_MAX_PENDING_MESSAGES;
+long MESSAGE_TTL_MS = DEFAULT_MESSAGE_TTL_MS;
 
 // ============================================================
 // 运行时变量（请勿修改）
@@ -80,12 +89,117 @@ ConcurrentLinkedQueue pendingMessages = new ConcurrentLinkedQueue();
 // ============================================================
 
 void onLoad() {
+    loadLocalConfig();
     log("Moltbot 消息桥接器加载中...");
     // 【安全】不要在日志中显示完整 URL，可能包含敏感信息
     log("服务器地址: " + maskUrl(SERVER_URL));
     log("allowFrom 配置将从服务端下发");
     initWebSocketClient();
     connectToServer();
+}
+
+void loadLocalConfig() {
+    try {
+        File cfgFile = new File(pluginDir, "config.yml");
+        if (!cfgFile.exists() || !cfgFile.isFile()) {
+            log("未找到 config.yml，使用内置默认配置");
+            return;
+        }
+
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new FileReader(cfgFile));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                parseConfigLine(line);
+            }
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (Exception ignore) {}
+            }
+        }
+
+        log("已加载本地配置: " + cfgFile.getAbsolutePath());
+    } catch (Exception e) {
+        log("加载 config.yml 失败，使用内置默认配置: " + e.getMessage());
+    }
+}
+
+void parseConfigLine(String rawLine) {
+    if (rawLine == null) {
+        return;
+    }
+    String line = rawLine.trim();
+    if (line.isEmpty() || line.startsWith("#")) {
+        return;
+    }
+
+    int commentIdx = line.indexOf(" #");
+    if (commentIdx >= 0) {
+        line = line.substring(0, commentIdx).trim();
+    }
+    if (line.isEmpty()) {
+        return;
+    }
+
+    int idx = line.indexOf(":");
+    if (idx <= 0) {
+        return;
+    }
+
+    String key = line.substring(0, idx).trim();
+    String value = line.substring(idx + 1).trim();
+    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.substring(1, value.length() - 1);
+    }
+
+    if ("server_url".equals(key)) {
+        if (value.length() > 0) SERVER_URL = value;
+        return;
+    }
+    if ("auth_token".equals(key)) {
+        if (value.length() > 0) AUTH_TOKEN = value;
+        return;
+    }
+    if ("heartbeat_interval_ms".equals(key)) {
+        HEARTBEAT_INTERVAL = parseLongOrDefault(value, DEFAULT_HEARTBEAT_INTERVAL);
+        return;
+    }
+    if ("max_missed_heartbeats".equals(key)) {
+        MAX_MISSED_HEARTBEATS = (int) parseLongOrDefault(value, DEFAULT_MAX_MISSED_HEARTBEATS);
+        return;
+    }
+    if ("send_rate_limit_per_min".equals(key)) {
+        SEND_RATE_LIMIT = (int) parseLongOrDefault(value, DEFAULT_SEND_RATE_LIMIT);
+        return;
+    }
+    if ("max_send_retries".equals(key)) {
+        MAX_SEND_RETRIES = (int) parseLongOrDefault(value, DEFAULT_MAX_SEND_RETRIES);
+        return;
+    }
+    if ("retry_delay_ms".equals(key)) {
+        RETRY_DELAY_MS = parseLongOrDefault(value, DEFAULT_RETRY_DELAY_MS);
+        return;
+    }
+    if ("max_pending_messages".equals(key)) {
+        MAX_PENDING_MESSAGES = (int) parseLongOrDefault(value, DEFAULT_MAX_PENDING_MESSAGES);
+        return;
+    }
+    if ("message_ttl_ms".equals(key)) {
+        MESSAGE_TTL_MS = parseLongOrDefault(value, DEFAULT_MESSAGE_TTL_MS);
+        return;
+    }
+}
+
+long parseLongOrDefault(String raw, long def) {
+    try {
+        if (raw == null) return def;
+        String cleaned = raw.trim();
+        if (cleaned.isEmpty()) return def;
+        return Long.parseLong(cleaned);
+    } catch (Exception e) {
+        return def;
+    }
 }
 
 void onUnLoad() {
@@ -378,11 +492,6 @@ boolean enqueueMessage(String payload, String description) {
 void onHandleMsg(Object msgInfoBean) {
     // 过滤：自己发送的消息不转发
     if (msgInfoBean.isSend()) {
-        return;
-    }
-
-    // 过滤：只处理私聊（如果配置了）
-    if (PRIVATE_ONLY && !msgInfoBean.isPrivateChat()) {
         return;
     }
 
