@@ -26,6 +26,8 @@ openclaw plugins install openclaw-channel-wap
       "groupPolicy": "open",
       "groupAllowChats": ["*"],
       "groupAllowFrom": ["wxid_owner"],
+      "noMentionContextGroups": [],
+      "noMentionContextHistoryLimit": 8,
       "dmPolicy": "pairing",
       "requireMentionInGroup": true,
       "silentPairing": true,
@@ -37,6 +39,8 @@ openclaw plugins install openclaw-channel-wap
           "groupPolicy": "allowlist",
           "groupAllowChats": ["123456789@chatroom"],
           "groupAllowFrom": ["wxid_owner_a"],
+          "noMentionContextGroups": ["123456789@chatroom"],
+          "noMentionContextHistoryLimit": 8,
           "dmPolicy": "pairing",
           "requireMentionInGroup": true,
           "silentPairing": true
@@ -57,6 +61,8 @@ openclaw plugins install openclaw-channel-wap
 | `groupPolicy` | 群策略：`open/allowlist/disabled` |
 | `groupAllowChats` | `groupPolicy=allowlist` 时允许触发的群 talker 列表（支持 `*`） |
 | `groupAllowFrom` | 群聊发送者允许列表 |
+| `noMentionContextGroups` | 允许“未@仅记录上下文”的群列表（需手动配置，支持 `*`） |
+| `noMentionContextHistoryLimit` | 每个群保留的未@上下文条数（默认 8） |
 | `dmPolicy` | `pairing/allowlist/open/disabled` |
 | `requireMentionInGroup` | 群聊是否必须 @ 机器人 |
 | `silentPairing` | pairing 模式下是否静默拦截（不自动回配对码） |
@@ -73,7 +79,7 @@ openclaw plugins install openclaw-channel-wap
 ## 协议变化（3.0）
 
 - 上行消息新增 `is_at_me`、`at_user_list`。
-- 下行 `config` 支持 `allow_from/group_policy/group_allow_chats/group_allow_from/dm_policy/require_mention_in_group/silent_pairing`。
+- 下行 `config` 支持 `allow_from/group_policy/group_allow_chats/group_allow_from/no_mention_context_groups/dm_policy/require_mention_in_group/silent_pairing`。
 - 默认 `dmPolicy=pairing`，并支持静默 pairing（不回消息，仅登记请求）。
 
 ## 开发

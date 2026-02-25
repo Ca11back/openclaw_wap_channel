@@ -32,6 +32,7 @@ String AUTH_TOKEN = DEFAULT_AUTH_TOKEN;
 Set ALLOW_FROM = Collections.synchronizedSet(new HashSet());
 Set GROUP_ALLOW_CHATS = Collections.synchronizedSet(new HashSet());
 Set GROUP_ALLOW_FROM = Collections.synchronizedSet(new HashSet());
+Set NO_MENTION_CONTEXT_GROUPS = Collections.synchronizedSet(new HashSet());
 boolean configReceived = false;  // 是否已收到服务端配置
 String groupPolicy = "open";  // 群策略: open/allowlist/disabled
 boolean requireMentionInGroup = true;  // 群聊是否必须 @ 才触发
@@ -281,6 +282,7 @@ void connectToServer() {
             ALLOW_FROM.clear();
             GROUP_ALLOW_CHATS.clear();
             GROUP_ALLOW_FROM.clear();
+            NO_MENTION_CONTEXT_GROUPS.clear();
             groupPolicy = "open";
             startHeartbeat();
             startRetrySender();
@@ -514,8 +516,8 @@ void onHandleMsg(Object msgInfoBean) {
         if (!isGroupChatAllowedByPolicy(talker)) {
             return;
         }
-        // 群聊可选：仅 @ 我时触发
-        if (requireMentionInGroup && !isMentionedMe) {
+        // 群聊可选：仅 @ 我时触发；部分群可配置为未@也上报用于上下文
+        if (requireMentionInGroup && !isMentionedMe && !isNoMentionContextGroupEnabled(talker)) {
             return;
         }
         // 群成员 allowlist（可选）
@@ -1000,6 +1002,14 @@ boolean isGroupChatAllowedByPolicy(String talker) {
     return GROUP_ALLOW_CHATS.contains("*") || GROUP_ALLOW_CHATS.contains(normalizedTalker);
 }
 
+boolean isNoMentionContextGroupEnabled(String talker) {
+    String normalizedTalker = normalizeId(talker);
+    if (NO_MENTION_CONTEXT_GROUPS.size() == 0) {
+        return false;
+    }
+    return NO_MENTION_CONTEXT_GROUPS.contains("*") || NO_MENTION_CONTEXT_GROUPS.contains(normalizedTalker);
+}
+
 // ============================================================
 // 处理服务器指令
 // ============================================================
@@ -1064,12 +1074,24 @@ void handleServerMessage(String text) {
                     }
                 }
 
+                JSONArray noMentionContextGroups = data.getJSONArray("no_mention_context_groups");
+                NO_MENTION_CONTEXT_GROUPS.clear();
+                if (noMentionContextGroups != null) {
+                    for (int i = 0; i < noMentionContextGroups.size(); i++) {
+                        String talker = noMentionContextGroups.getString(i);
+                        String normalized = normalizeId(talker);
+                        if (!normalized.isEmpty()) {
+                            NO_MENTION_CONTEXT_GROUPS.add(normalized);
+                        }
+                    }
+                }
+
                 Boolean requireMention = data.getBoolean("require_mention_in_group");
                 if (requireMention != null) {
                     requireMentionInGroup = requireMention.booleanValue();
                 }
 
-                log("收到服务端配置，group_policy=" + groupPolicy + ", group_allow_chats: " + GROUP_ALLOW_CHATS + ", allow_from: " + ALLOW_FROM + ", group_allow_from: " + GROUP_ALLOW_FROM + ", require_mention_in_group=" + requireMentionInGroup);
+                log("收到服务端配置，group_policy=" + groupPolicy + ", group_allow_chats: " + GROUP_ALLOW_CHATS + ", no_mention_context_groups: " + NO_MENTION_CONTEXT_GROUPS + ", allow_from: " + ALLOW_FROM + ", group_allow_from: " + GROUP_ALLOW_FROM + ", require_mention_in_group=" + requireMentionInGroup);
             }
             return;
         }

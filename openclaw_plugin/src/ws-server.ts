@@ -8,10 +8,13 @@ import {
   DEFAULT_PORT,
   getWapChannelConfig,
   isGroupChatAllowed,
+  isNoMentionContextGroupEnabled,
   isSenderAllowed,
   resolveAllowFrom,
   resolveGroupAllowChats,
   resolveGroupAllowFrom,
+  resolveNoMentionContextGroups,
+  resolveNoMentionContextHistoryLimit,
   resolveGroupPolicy,
   resolveWapAccount,
   type WapAccount,
@@ -43,6 +46,44 @@ const wechatContextHint = `
 尽可能保持简洁（单条 < 300 字）
 禁止使用MarkDown
 `;
+
+type PendingGroupHistoryEntry = {
+  sender: string;
+  body: string;
+  timestamp?: number;
+  messageId?: string;
+};
+
+const pendingGroupHistories = new Map<string, PendingGroupHistoryEntry[]>();
+
+function buildPendingHistoryKey(accountId: string, talker: string): string {
+  return `${accountId}:${talker.trim().toLowerCase()}`;
+}
+
+function appendPendingHistory(
+  accountId: string,
+  talker: string,
+  entry: PendingGroupHistoryEntry,
+  limit: number,
+) {
+  if (limit <= 0) {
+    return;
+  }
+  const key = buildPendingHistoryKey(accountId, talker);
+  const list = pendingGroupHistories.get(key) ?? [];
+  list.push(entry);
+  while (list.length > limit) {
+    list.shift();
+  }
+  pendingGroupHistories.set(key, list);
+}
+
+function consumePendingHistory(accountId: string, talker: string): PendingGroupHistoryEntry[] {
+  const key = buildPendingHistoryKey(accountId, talker);
+  const list = pendingGroupHistories.get(key) ?? [];
+  pendingGroupHistories.delete(key);
+  return list;
+}
 
 export function setWapRuntime(api: OpenClawPluginApi) {
   runtime = api;
@@ -139,6 +180,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
   const groupPolicy = resolveGroupPolicy(account.config);
   const groupAllowChats = resolveGroupAllowChats(account.config);
   const groupAllowFrom = resolveGroupAllowFrom(account.config);
+  const noMentionContextGroups = resolveNoMentionContextGroups(account.config);
   const requireMentionInGroup = account.config.requireMentionInGroup ?? true;
   const silentPairing = account.config.silentPairing ?? true;
 
@@ -150,6 +192,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
         group_policy: groupPolicy,
         group_allow_chats: groupAllowChats,
         group_allow_from: groupAllowFrom,
+        no_mention_context_groups: noMentionContextGroups,
         dm_policy: account.config.dmPolicy ?? "pairing",
         require_mention_in_group: requireMentionInGroup,
         silent_pairing: silentPairing,
@@ -234,6 +277,8 @@ async function processWapInboundMessage(params: {
   const groupPolicy = resolveGroupPolicy(client.account.config);
   const groupAllowChats = resolveGroupAllowChats(client.account.config);
   const groupAllowFrom = resolveGroupAllowFrom(client.account.config);
+  const noMentionContextGroups = resolveNoMentionContextGroups(client.account.config);
+  const noMentionContextHistoryLimit = resolveNoMentionContextHistoryLimit(client.account.config);
   const storeAllowFrom = isGroup
     ? []
     : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, client.accountId);
@@ -255,7 +300,24 @@ async function processWapInboundMessage(params: {
     }
     const requireMention = client.account.config.requireMentionInGroup ?? true;
     if (requireMention && msgData.is_at_me !== true) {
-      api.logger.debug(`WAP drop group message from ${msgData.sender}: mention required`);
+      if (isNoMentionContextGroupEnabled(msgData.talker, noMentionContextGroups)) {
+        appendPendingHistory(
+          client.accountId,
+          msgData.talker,
+          {
+            sender: msgData.sender,
+            body: bodyText,
+            timestamp: msgData.timestamp,
+            messageId: String(msgData.msg_id),
+          },
+          noMentionContextHistoryLimit,
+        );
+        api.logger.debug(
+          `WAP store no-mention context for ${msgData.talker} from ${msgData.sender}`,
+        );
+      } else {
+        api.logger.debug(`WAP drop group message from ${msgData.sender}: mention required`);
+      }
       return;
     }
     if (configuredAllowFrom.length > 0 && !senderAllowed) {
@@ -349,9 +411,29 @@ async function processWapInboundMessage(params: {
     chatType,
     sender: { name: msgData.sender, id: msgData.sender },
   });
+  let combinedBody = body;
+  if (isGroup) {
+    const pendingEntries = consumePendingHistory(client.accountId, msgData.talker);
+    if (pendingEntries.length > 0) {
+      const historyLines: string[] = [];
+      for (const entry of pendingEntries) {
+        historyLines.push(
+          core.channel.reply.formatInboundEnvelope({
+            channel: "WeChat",
+            from: `${entry.sender} in ${msgData.talker}`,
+            timestamp: entry.timestamp,
+            body: `${entry.body} [id:${entry.messageId ?? "unknown"} group:${msgData.talker}]`,
+            chatType: "group",
+            sender: { name: entry.sender, id: entry.sender },
+          }),
+        );
+      }
+      combinedBody = `${historyLines.join("\n")}\n${body}`;
+    }
+  }
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
-    Body: body,
+    Body: combinedBody,
     RawBody: bodyText,
     CommandBody: bodyText,
     From: isGroup ? `${CHANNEL_ID}:group:${msgData.talker}` : `${CHANNEL_ID}:${msgData.sender}`,

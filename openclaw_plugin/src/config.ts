@@ -15,6 +15,8 @@ export interface WapAccountConfig {
   groupPolicy?: WapGroupPolicy;
   groupAllowChats?: string[];
   groupAllowFrom?: string[];
+  noMentionContextGroups?: string[];
+  noMentionContextHistoryLimit?: number;
   dmPolicy?: WapDmPolicy;
   requireMentionInGroup?: boolean;
   silentPairing?: boolean;
@@ -48,6 +50,7 @@ function mergeAccountConfig(base: WapAccountConfig, next: WapAccountConfig): Wap
     allowFrom: next.allowFrom ?? base.allowFrom,
     groupAllowChats: next.groupAllowChats ?? base.groupAllowChats,
     groupAllowFrom: next.groupAllowFrom ?? base.groupAllowFrom,
+    noMentionContextGroups: next.noMentionContextGroups ?? base.noMentionContextGroups,
   };
 }
 
@@ -82,6 +85,8 @@ export function resolveWapAccount(cfg: OpenClawConfig, accountId?: string | null
     groupPolicy: channelConfig.groupPolicy,
     groupAllowChats: channelConfig.groupAllowChats,
     groupAllowFrom: channelConfig.groupAllowFrom,
+    noMentionContextGroups: channelConfig.noMentionContextGroups,
+    noMentionContextHistoryLimit: channelConfig.noMentionContextHistoryLimit,
     dmPolicy: channelConfig.dmPolicy,
     requireMentionInGroup: channelConfig.requireMentionInGroup,
     silentPairing: channelConfig.silentPairing,
@@ -117,6 +122,28 @@ export function resolveGroupAllowFrom(config: WapAccountConfig): string[] {
   return (config.groupAllowFrom ?? [])
     .map((entry) => String(entry).trim())
     .filter((entry) => entry.length > 0);
+}
+
+export function resolveNoMentionContextGroups(config: WapAccountConfig): string[] {
+  return (config.noMentionContextGroups ?? [])
+    .map((entry) => normalizeWapMessagingTarget(String(entry)))
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+}
+
+export function resolveNoMentionContextHistoryLimit(config: WapAccountConfig): number {
+  const raw = Number(config.noMentionContextHistoryLimit);
+  if (!Number.isFinite(raw)) {
+    return 8;
+  }
+  const normalized = Math.trunc(raw);
+  if (normalized < 0) {
+    return 0;
+  }
+  if (normalized > 50) {
+    return 50;
+  }
+  return normalized;
 }
 
 export function normalizeSenderId(raw: string): string {
@@ -222,6 +249,14 @@ export function isGroupChatAllowed(
   return groupAllowChats.some((entry) => entry === "*" || entry === normalizedTalker);
 }
 
+export function isNoMentionContextGroupEnabled(talker: string, groups: string[]): boolean {
+  if (groups.length === 0) {
+    return false;
+  }
+  const normalizedTalker = normalizeWapMessagingTarget(talker).trim().toLowerCase();
+  return groups.some((entry) => entry === "*" || entry === normalizedTalker);
+}
+
 export const wapChannelConfigSchema = {
   schema: {
     type: "object",
@@ -238,6 +273,8 @@ export const wapChannelConfigSchema = {
       },
       groupAllowChats: { type: "array", items: { type: "string" } },
       groupAllowFrom: { type: "array", items: { type: "string" } },
+      noMentionContextGroups: { type: "array", items: { type: "string" } },
+      noMentionContextHistoryLimit: { type: "number" },
       dmPolicy: {
         type: "string",
         enum: ["open", "pairing", "allowlist", "disabled"],
@@ -260,6 +297,8 @@ export const wapChannelConfigSchema = {
             },
             groupAllowChats: { type: "array", items: { type: "string" } },
             groupAllowFrom: { type: "array", items: { type: "string" } },
+            noMentionContextGroups: { type: "array", items: { type: "string" } },
+            noMentionContextHistoryLimit: { type: "number" },
             dmPolicy: {
               type: "string",
               enum: ["open", "pairing", "allowlist", "disabled"],
@@ -288,6 +327,12 @@ export const wapChannelConfigSchema = {
     },
     "channels.openclaw-channel-wap.groupAllowChats": {
       help: "Allowed group talker IDs when groupPolicy=allowlist (supports '*').",
+    },
+    "channels.openclaw-channel-wap.noMentionContextGroups": {
+      help: "Groups where non-mention messages are uploaded as context only (supports '*').",
+    },
+    "channels.openclaw-channel-wap.noMentionContextHistoryLimit": {
+      help: "Pending context entries kept per group for no-mention messages.",
     },
     "channels.openclaw-channel-wap.silentPairing": {
       help: "When true, pairing requests are recorded silently without auto-reply.",

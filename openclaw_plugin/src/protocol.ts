@@ -49,6 +49,7 @@ export interface WapConfigCommand {
         group_policy: "open" | "allowlist" | "disabled";
         group_allow_chats: string[];
         group_allow_from: string[];
+        no_mention_context_groups: string[];
         dm_policy: "open" | "pairing" | "allowlist" | "disabled";
         require_mention_in_group: boolean;
         silent_pairing: boolean;
