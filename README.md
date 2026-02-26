@@ -176,6 +176,33 @@ message_ttl_ms: 30000
 }
 ```
 
+下行 `send_image` 示例：
+
+```json
+{
+  "type": "send_image",
+  "data": {
+    "talker": "wxid_or_groupid",
+    "image_url": "https://example.com/a.jpg",
+    "caption": "可选图片说明"
+  }
+}
+```
+
+下行 `send_file` 示例（当前 WAux 客户端会降级为“标题+链接”文本发送）：
+
+```json
+{
+  "type": "send_file",
+  "data": {
+    "talker": "wxid_or_groupid",
+    "file_url": "https://example.com/demo.pdf",
+    "file_name": "demo.pdf",
+    "caption": "可选文件说明"
+  }
+}
+```
+
 ## 目录文档说明
 
 - `openclaw_plugin/README.md`：服务端子模块简述（详细以本主 README 为准）

@@ -15,6 +15,29 @@ import {
   wapChannelConfigSchema,
 } from "./config.js";
 import { getClientCount, getClientStats, getWapRuntime, sendToClient } from "./ws-server.js";
+import type { WapDownstreamCommand } from "./protocol.js";
+
+function stripUrlQueryAndHash(input: string): string {
+  return input.split("#", 1)[0]?.split("?", 1)[0] ?? input;
+}
+
+function getPathExt(input: string): string {
+  const path = stripUrlQueryAndHash(input).trim();
+  const idx = path.lastIndexOf(".");
+  if (idx < 0 || idx === path.length - 1) {
+    return "";
+  }
+  return path.substring(idx + 1).toLowerCase();
+}
+
+function looksLikeImageMedia(input: string): boolean {
+  const ext = getPathExt(input);
+  return ["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif"].includes(ext);
+}
+
+function looksLikeRemoteUrl(input: string): boolean {
+  return /^https?:\/\//i.test(input.trim());
+}
 
 function getAccountClientCount(accountId: string): number {
   return getClientStats().filter((client) => client.accountId === accountId).length;
@@ -44,7 +67,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
   },
   capabilities: {
     chatTypes: ["direct", "group"],
-    media: false,
+    media: true,
     threads: false,
     reactions: false,
     nativeCommands: false,
@@ -144,14 +167,32 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       }
       const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
       const normalizedTarget = normalizeWapMessagingTarget(to);
-      const content = text ? `${text}\n\nAttachment: ${mediaUrl}` : `Attachment: ${mediaUrl}`;
-      const sent = sendToClient(
-        {
-          type: "send_text",
-          data: { talker: normalizedTarget, content },
-        },
-        effectiveAccountId,
-      );
+      if (!looksLikeRemoteUrl(mediaUrl)) {
+        runtime?.logger.warn(`WAP sendMedia rejected non-http URL: ${mediaUrl}`);
+        return {
+          ok: false,
+          error: "WAP mediaUrl must be an http(s) URL reachable by Android client",
+          channel: CHANNEL_ID,
+        };
+      }
+      const command: WapDownstreamCommand = looksLikeImageMedia(mediaUrl)
+        ? {
+            type: "send_image",
+            data: {
+              talker: normalizedTarget,
+              image_url: mediaUrl,
+              caption: text || undefined,
+            },
+          }
+        : {
+            type: "send_file",
+            data: {
+              talker: normalizedTarget,
+              file_url: mediaUrl,
+              caption: text || undefined,
+            },
+          };
+      const sent = sendToClient(command, effectiveAccountId);
       if (!sent) {
         runtime?.logger.warn(
           `WAP sendMedia failed: no connected clients for account ${effectiveAccountId}`,

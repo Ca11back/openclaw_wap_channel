@@ -22,7 +22,7 @@ import {
   resolveWapAccount,
   type WapAccount,
 } from "./config.js";
-import type { WapMessageData, WapSendTextCommand, WapUpstreamMessage } from "./protocol.js";
+import type { WapDownstreamCommand, WapMessageData, WapSendTextCommand, WapUpstreamMessage } from "./protocol.js";
 
 let wss: WebSocketServer | null = null;
 let runtime: OpenClawPluginApi | null = null;
@@ -502,27 +502,65 @@ async function processWapInboundMessage(params: {
     core.channel.reply.createReplyDispatcherWithTyping({
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
       deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
+        const mediaList = payload.mediaUrls?.length
+          ? payload.mediaUrls
+          : payload.mediaUrl
+            ? [payload.mediaUrl]
+            : [];
         const replyText = payload.text ?? "";
-        if (!replyText) {
+
+        if (mediaList.length > 0) {
+          for (const mediaUrl of mediaList) {
+            if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl.trim())) {
+              api.logger.warn(`WAP skip non-http media URL in reply: ${mediaUrl}`);
+              continue;
+            }
+            const isImage = /\.(jpe?g|png|gif|webp|bmp|heic|heif)(?:[?#].*)?$/i.test(mediaUrl);
+            const command: WapDownstreamCommand = isImage
+              ? {
+                  type: "send_image",
+                  data: {
+                    talker: msgData.talker,
+                    image_url: mediaUrl,
+                    caption: replyText || undefined,
+                  },
+                }
+              : {
+                  type: "send_file",
+                  data: {
+                    talker: msgData.talker,
+                    file_url: mediaUrl,
+                    caption: replyText || undefined,
+                  },
+                };
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(command));
+            } else {
+              api.logger.warn(`WAP WebSocket not open, cannot send media reply to ${msgData.talker}`);
+            }
+          }
           return;
         }
-        const chunkMode = core.channel.text.resolveChunkMode(cfg, CHANNEL_ID, client.accountId);
-        const chunks = core.channel.text.chunkMarkdownTextWithMode(replyText, textLimit, chunkMode);
-        for (const chunk of chunks.length > 0 ? chunks : [replyText]) {
-          if (!chunk) {
-            continue;
-          }
-          const command: WapSendTextCommand = {
-            type: "send_text",
-            data: {
-              talker: msgData.talker,
-              content: chunk,
-            },
-          };
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(command));
-          } else {
-            api.logger.warn(`WAP WebSocket not open, cannot send reply to ${msgData.talker}`);
+
+        if (replyText) {
+          const chunkMode = core.channel.text.resolveChunkMode(cfg, CHANNEL_ID, client.accountId);
+          const chunks = core.channel.text.chunkMarkdownTextWithMode(replyText, textLimit, chunkMode);
+          for (const chunk of chunks.length > 0 ? chunks : [replyText]) {
+            if (!chunk) {
+              continue;
+            }
+            const command: WapSendTextCommand = {
+              type: "send_text",
+              data: {
+                talker: msgData.talker,
+                content: chunk,
+              },
+            };
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(command));
+            } else {
+              api.logger.warn(`WAP WebSocket not open, cannot send reply to ${msgData.talker}`);
+            }
           }
         }
       },
@@ -603,7 +641,7 @@ function handleDisconnect(clientId: string, api: OpenClawPluginApi) {
   );
 }
 
-export function sendToClient(command: WapSendTextCommand, accountId?: string): boolean {
+export function sendToClient(command: WapDownstreamCommand, accountId?: string): boolean {
   const targetAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
   for (const [, client] of clients) {
     if (client.accountId === targetAccountId && client.ws.readyState === WebSocket.OPEN) {

@@ -15,6 +15,10 @@ import java.util.Collections;
 import java.io.File;
 import java.io.FileReader;
 import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.FileOutputStream;
+import java.net.URL;
+import java.net.URLConnection;
 
 // ============================================================
 // 配置区域 - 请根据实际情况修改
@@ -64,6 +68,10 @@ long RETRY_DELAY_MS = DEFAULT_RETRY_DELAY_MS;
 int MAX_PENDING_MESSAGES = DEFAULT_MAX_PENDING_MESSAGES;
 long MESSAGE_TTL_MS = DEFAULT_MESSAGE_TTL_MS;
 
+// 调试：仅打印 msgInfoBean，不做消息转发
+boolean DEFAULT_DEBUG_DUMP_ONLY = false;
+boolean DEBUG_DUMP_ONLY = DEFAULT_DEBUG_DUMP_ONLY;
+
 // ============================================================
 // 运行时变量（请勿修改）
 // ============================================================
@@ -95,6 +103,7 @@ void onLoad() {
     // 【安全】不要在日志中显示完整 URL，可能包含敏感信息
     log("服务器地址: " + maskUrl(SERVER_URL));
     log("allowFrom 配置将从服务端下发");
+    log("debug_dump_only=" + DEBUG_DUMP_ONLY);
     initWebSocketClient();
     connectToServer();
 }
@@ -188,6 +197,10 @@ void parseConfigLine(String rawLine) {
     }
     if ("message_ttl_ms".equals(key)) {
         MESSAGE_TTL_MS = parseLongOrDefault(value, DEFAULT_MESSAGE_TTL_MS);
+        return;
+    }
+    if ("debug_dump_only".equals(key)) {
+        DEBUG_DUMP_ONLY = "true".equalsIgnoreCase(value) || "1".equals(value);
         return;
     }
 }
@@ -497,8 +510,9 @@ void onHandleMsg(Object msgInfoBean) {
         return;
     }
 
-    // 暂只支持文本消息
-    if (!msgInfoBean.isText()) {
+    // 仅上报文本消息，其他类型忽略
+    boolean isTextMessage = msgInfoBean.isText();
+    if (!isTextMessage) {
         return;
     }
 
@@ -530,8 +544,18 @@ void onHandleMsg(Object msgInfoBean) {
         }
     }
 
+    // 调试模式：完整打印 msgInfoBean 后立即结束，不进行后续转发
+    if (DEBUG_DUMP_ONLY) {
+        dumpMsgInfoBean(msgInfoBean);
+        return;
+    }
+
     // 构建消息 JSON
     try {
+        String content = buildInboundContent(msgInfoBean, isTextMessage);
+        if (content == null || content.trim().isEmpty()) {
+            return;
+        }
         JSONObject msg = new JSONObject();
         msg.put("type", "message");
 
@@ -540,7 +564,7 @@ void onHandleMsg(Object msgInfoBean) {
         data.put("msg_type", msgInfoBean.getType());
         data.put("talker", talker);
         data.put("sender", sender);
-        data.put("content", msgInfoBean.getContent());
+        data.put("content", content);
         data.put("timestamp", msgInfoBean.getCreateTime());
         data.put("is_private", msgInfoBean.isPrivateChat());
         data.put("is_group", msgInfoBean.isGroupChat());
@@ -553,7 +577,7 @@ void onHandleMsg(Object msgInfoBean) {
         msg.put("data", data);
 
         // 通过队列发送，支持重试
-        String contentPreview = msgInfoBean.getContent();
+        String contentPreview = content;
         if (contentPreview.length() > 30) {
             contentPreview = contentPreview.substring(0, 30) + "...";
         }
@@ -565,6 +589,60 @@ void onHandleMsg(Object msgInfoBean) {
     } catch (Exception e) {
         log("消息处理失败: " + e.getMessage());
     }
+}
+
+void dumpMsgInfoBean(Object msgInfoBean) {
+    if (msgInfoBean == null) {
+        log("msgInfoBean = null");
+        return;
+    }
+    try {
+        log("===== msgInfoBean dump begin =====");
+        log("class=" + msgInfoBean.getClass().getName());
+        try {
+            log("toString=" + String.valueOf(msgInfoBean));
+        } catch (Exception ignore) {}
+
+        java.lang.reflect.Method[] methods = msgInfoBean.getClass().getMethods();
+        // 按方法名排序，输出稳定
+        for (int i = 0; i < methods.length - 1; i++) {
+            for (int j = i + 1; j < methods.length; j++) {
+                String ni = methods[i].getName();
+                String nj = methods[j].getName();
+                if (ni != null && nj != null && ni.compareTo(nj) > 0) {
+                    java.lang.reflect.Method tmp = methods[i];
+                    methods[i] = methods[j];
+                    methods[j] = tmp;
+                }
+            }
+        }
+
+        for (int i = 0; i < methods.length; i++) {
+            java.lang.reflect.Method m = methods[i];
+            if (m == null) continue;
+            if (m.getParameterTypes() != null && m.getParameterTypes().length > 0) continue;
+            String name = m.getName();
+            if (name == null) continue;
+            if (!(name.startsWith("get") || name.startsWith("is"))) continue;
+            try {
+                Object value = m.invoke(msgInfoBean, new Object[0]);
+                log("msgInfoBean." + name + "() = " + String.valueOf(value));
+            } catch (Exception e) {
+                log("msgInfoBean." + name + "() <error> " + e.getMessage());
+            }
+        }
+        log("===== msgInfoBean dump end =====");
+    } catch (Exception e) {
+        log("dumpMsgInfoBean failed: " + e.getMessage());
+    }
+}
+
+String buildInboundContent(Object msgInfoBean, boolean isTextMessage) {
+    if (isTextMessage) {
+        String text = msgInfoBean.getContent();
+        return text == null ? "" : text;
+    }
+    return "";
 }
 
 boolean resolveIsMentionedMe(Object msgInfoBean) {
@@ -1010,6 +1088,118 @@ boolean isNoMentionContextGroupEnabled(String talker) {
     return NO_MENTION_CONTEXT_GROUPS.contains("*") || NO_MENTION_CONTEXT_GROUPS.contains(normalizedTalker);
 }
 
+boolean checkAndIncreaseSendRateLimit() {
+    long now = System.currentTimeMillis();
+    if (now - sendRateLimitWindowStart > 60000) {
+        sendRateLimitWindowStart = now;
+        sendCountInWindow = 0;
+    }
+    sendCountInWindow++;
+    if (sendCountInWindow > SEND_RATE_LIMIT) {
+        log("【安全】发送速率超限，本分钟已发送 " + sendCountInWindow + " 条消息");
+        return false;
+    }
+    return true;
+}
+
+String resolveAndValidateOutboundTalker(String rawTalker, String commandType) {
+    String resolvedTalker = resolveOutboundTalker(rawTalker);
+    if (resolvedTalker == null || resolvedTalker.isEmpty()) {
+        log(commandType + " 目标解析失败，无法发送: " + rawTalker);
+        return null;
+    }
+
+    boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
+    if (!isGroupTalker && !isFriendWxid(resolvedTalker)) {
+        log("【安全】拒绝发送私聊：目标不是当前账号好友: " + resolvedTalker);
+        return null;
+    }
+    if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(resolvedTalker))) {
+        log("【安全】拒绝发送消息到非 allowFrom 用户: " + resolvedTalker);
+        return null;
+    }
+    return resolvedTalker;
+}
+
+boolean isHttpUrl(String rawUrl) {
+    if (rawUrl == null) {
+        return false;
+    }
+    String url = rawUrl.trim().toLowerCase();
+    return url.startsWith("http://") || url.startsWith("https://");
+}
+
+String extractFileNameFromUrl(String rawUrl) {
+    if (rawUrl == null) {
+        return "wap_media.bin";
+    }
+    String url = rawUrl.trim();
+    int hashIdx = url.indexOf('#');
+    if (hashIdx >= 0) {
+        url = url.substring(0, hashIdx);
+    }
+    int queryIdx = url.indexOf('?');
+    if (queryIdx >= 0) {
+        url = url.substring(0, queryIdx);
+    }
+    int slashIdx = url.lastIndexOf('/');
+    String name = slashIdx >= 0 ? url.substring(slashIdx + 1) : url;
+    if (name == null || name.trim().isEmpty()) {
+        return "wap_media.bin";
+    }
+    return name.trim();
+}
+
+String sanitizeFileName(String rawName, String fallback) {
+    String name = rawName;
+    if (name == null || name.trim().isEmpty()) {
+        name = fallback;
+    }
+    if (name == null || name.trim().isEmpty()) {
+        name = "wap_media.bin";
+    }
+    name = name.trim().replace("\\", "_").replace("/", "_");
+    name = name.replace(":", "_").replace("*", "_").replace("?", "_");
+    name = name.replace("\"", "_").replace("<", "_").replace(">", "_").replace("|", "_");
+    if (name.length() > 96) {
+        name = name.substring(name.length() - 96);
+    }
+    return name;
+}
+
+File downloadRemoteFile(String url, String desiredName) {
+    InputStream in = null;
+    FileOutputStream out = null;
+    try {
+        String safeName = sanitizeFileName(desiredName, extractFileNameFromUrl(url));
+        String localName = System.currentTimeMillis() + "_" + safeName;
+        File outFile = new File(cacheDir, localName);
+
+        URL remote = new URL(url);
+        URLConnection conn = remote.openConnection();
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(60000);
+        conn.setRequestProperty("User-Agent", "openclaw-wap/1.0");
+        conn.connect();
+
+        in = conn.getInputStream();
+        out = new FileOutputStream(outFile);
+        byte[] buf = new byte[8192];
+        int readLen;
+        while ((readLen = in.read(buf)) != -1) {
+            out.write(buf, 0, readLen);
+        }
+        out.flush();
+        return outFile;
+    } catch (Exception e) {
+        log("下载媒体失败: " + e.getMessage());
+        return null;
+    } finally {
+        try { if (in != null) in.close(); } catch (Exception ignore) {}
+        try { if (out != null) out.close(); } catch (Exception ignore) {}
+    }
+}
+
 // ============================================================
 // 处理服务器指令
 // ============================================================
@@ -1111,49 +1301,102 @@ void handleServerMessage(String text) {
                 return;
             }
 
-            String resolvedTalker = resolveOutboundTalker(talker);
-            if (resolvedTalker == null || resolvedTalker.isEmpty()) {
-                log("send_text 目标解析失败，无法发送: " + talker);
+            String resolvedTalker = resolveAndValidateOutboundTalker(talker, "send_text");
+            if (resolvedTalker == null) {
+                return;
+            }
+            if (!checkAndIncreaseSendRateLimit()) {
                 return;
             }
 
-            // 【安全】出站 allowFrom 验证（仅私聊目标生效）
             boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
-            if (!isGroupTalker && !isFriendWxid(resolvedTalker)) {
-                log("【安全】拒绝发送私聊：目标不是当前账号好友: " + resolvedTalker);
-                return;
-            }
-            if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(resolvedTalker))) {
-                log("【安全】拒绝发送消息到非 allowFrom 用户: " + resolvedTalker);
-                return;
-            }
-
-            // 【安全】速率限制
-            long now = System.currentTimeMillis();
-            if (now - sendRateLimitWindowStart > 60000) {
-                // 新的一分钟窗口
-                sendRateLimitWindowStart = now;
-                sendCountInWindow = 0;
-            }
-            sendCountInWindow++;
-            if (sendCountInWindow > SEND_RATE_LIMIT) {
-                log("【安全】发送速率超限，本分钟已发送 " + sendCountInWindow + " 条消息");
-                return;
-            }
-
             String outboundContent = isGroupTalker ? renderGroupMentionTemplates(resolvedTalker, content) : content;
             sendText(resolvedTalker, outboundContent);
             String preview = outboundContent;
-            if (preview.length() > 50) {
-                preview = preview.substring(0, 50) + "...";
+            if (preview.length() > 30) {
+                preview = preview.substring(0, 30) + "...";
             }
             log("已发送消息到 " + resolvedTalker + ": " + preview);
             return;
         }
 
-        // 预留：发送图片消息
         if ("send_image".equals(type)) {
-            log("图片消息暂不支持，请等待后续版本");
+            JSONObject data = msg.getJSONObject("data");
+            if (data == null) {
+                log("send_image 指令缺少 data");
+                return;
+            }
+            String talker = data.getString("talker");
+            String imageUrl = data.getString("image_url");
+            String caption = data.getString("caption");
+            if (talker == null || imageUrl == null || imageUrl.trim().isEmpty()) {
+                log("send_image 指令缺少必要参数");
+                return;
+            }
+            if (!isHttpUrl(imageUrl)) {
+                log("send_image 仅支持 http(s) URL: " + imageUrl);
+                return;
+            }
+            String resolvedTalker = resolveAndValidateOutboundTalker(talker, "send_image");
+            if (resolvedTalker == null) {
+                return;
+            }
+            if (!checkAndIncreaseSendRateLimit()) {
+                return;
+            }
+            File imageFile = downloadRemoteFile(imageUrl, "wap_image.jpg");
+            if (imageFile == null || !imageFile.exists()) {
+                log("send_image 下载失败: " + imageUrl);
+                return;
+            }
+            sendImage(resolvedTalker, imageFile.getAbsolutePath());
+            if (caption != null && !caption.trim().isEmpty()) {
+                String outboundCaption = resolvedTalker.endsWith("@chatroom")
+                    ? renderGroupMentionTemplates(resolvedTalker, caption)
+                    : caption;
+                sendText(resolvedTalker, outboundCaption);
+            }
+            log("已发送图片到 " + resolvedTalker + ": " + imageFile.getName());
+            return;
+        }
+
+        if ("send_file".equals(type)) {
+            JSONObject data = msg.getJSONObject("data");
+            if (data == null) {
+                log("send_file 指令缺少 data");
+                return;
+            }
+            String talker = data.getString("talker");
+            String fileUrl = data.getString("file_url");
+            String fileName = data.getString("file_name");
+            String caption = data.getString("caption");
+            if (talker == null || fileUrl == null || fileUrl.trim().isEmpty()) {
+                log("send_file 指令缺少必要参数");
+                return;
+            }
+            if (!isHttpUrl(fileUrl)) {
+                log("send_file 仅支持 http(s) URL: " + fileUrl);
+                return;
+            }
+            String resolvedTalker = resolveAndValidateOutboundTalker(talker, "send_file");
+            if (resolvedTalker == null) {
+                return;
+            }
+            if (!checkAndIncreaseSendRateLimit()) {
+                return;
+            }
+            // WAux v1.2.6 未公开 sendFile API，文件以链接方式降级发送，确保兼容可用
+            String title = sanitizeFileName(fileName, extractFileNameFromUrl(fileUrl));
+            StringBuilder textBuilder = new StringBuilder();
+            textBuilder.append("文件: ").append(title).append("\n").append(fileUrl);
+            if (caption != null && !caption.trim().isEmpty()) {
+                textBuilder.insert(0, caption.trim() + "\n");
+            }
+            String outbound = resolvedTalker.endsWith("@chatroom")
+                ? renderGroupMentionTemplates(resolvedTalker, textBuilder.toString())
+                : textBuilder.toString();
+            sendText(resolvedTalker, outbound);
+            log("send_file 已降级为文本链接发送到 " + resolvedTalker + ": " + title);
             return;
         }
 

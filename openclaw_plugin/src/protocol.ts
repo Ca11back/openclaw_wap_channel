@@ -62,6 +62,17 @@ export interface WapSendImageCommand {
     data: {
         talker: string;
         image_url: string;
+        caption?: string;
+    };
+}
+
+export interface WapSendFileCommand {
+    type: "send_file";
+    data: {
+        talker: string;
+        file_url: string;
+        file_name?: string;
+        caption?: string;
     };
 }
 
@@ -80,4 +91,5 @@ export type WapDownstreamCommand =
     | WapPongCommand
     | WapConfigCommand
     | WapSendImageCommand
+    | WapSendFileCommand
     | WapSendVoiceCommand;
