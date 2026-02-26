@@ -3,6 +3,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 export const CHANNEL_ID = "openclaw-channel-wap" as const;
 export const DEFAULT_ACCOUNT_ID = "default" as const;
 export const DEFAULT_PORT = 8765;
+export const DEFAULT_HOST = "127.0.0.1" as const;
 
 export type WapDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
 export type WapGroupPolicy = "open" | "allowlist" | "disabled";
@@ -23,6 +24,7 @@ export interface WapAccountConfig {
 }
 
 export interface WapChannelConfig extends WapAccountConfig {
+  host?: string;
   port?: number;
   accounts?: Record<string, WapAccountConfig>;
 }
@@ -264,6 +266,7 @@ export const wapChannelConfigSchema = {
     properties: {
       enabled: { type: "boolean" },
       name: { type: "string" },
+      host: { type: "string" },
       port: { type: "number" },
       authToken: { type: "string" },
       allowFrom: { type: "array", items: { type: "string" } },

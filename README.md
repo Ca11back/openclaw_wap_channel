@@ -26,6 +26,7 @@ openclaw plugins install openclaw-channel-wap
   "channels": {
     "openclaw-channel-wap": {
       "enabled": true,
+      "host": "127.0.0.1",
       "port": 8765,
       "authToken": "global-token",
       "allowFrom": ["wxid_owner"],
@@ -79,6 +80,7 @@ message_ttl_ms: 30000
 
 | 字段 | 说明 |
 |---|---|
+| `host` | WebSocket 监听地址（默认 `127.0.0.1`） |
 | `port` | WebSocket 服务端口（全局） |
 | `authToken` | 全局连接 token（可被账户级覆盖） |
 | `allowFrom` | 私聊允许列表 |

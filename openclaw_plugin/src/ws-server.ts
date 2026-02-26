@@ -5,6 +5,7 @@ import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk";
 import {
   CHANNEL_ID,
   DEFAULT_ACCOUNT_ID,
+  DEFAULT_HOST,
   DEFAULT_PORT,
   getWapChannelConfig,
   isGroupChatAllowed,
@@ -100,13 +101,15 @@ export function startWsService(api: OpenClawPluginApi) {
   }
 
   const channelConfig = getWapChannelConfig(api.config);
+  const host = channelConfig.host?.trim() || DEFAULT_HOST;
   const port = channelConfig.port ?? DEFAULT_PORT;
 
   wss = new WebSocketServer({
+    host,
     port,
     maxPayload: MAX_MESSAGE_SIZE,
   });
-  api.logger.info(`WAP WebSocket server started on port ${port}`);
+  api.logger.info(`WAP WebSocket server started on ${host}:${port}`);
 
   wss.on("connection", (ws, req) => {
     const clientId = handleConnection(ws, req, api);
