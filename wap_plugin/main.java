@@ -500,6 +500,20 @@ boolean enqueueMessage(String payload, String description) {
     return true;
 }
 
+boolean sendMessageDirectly(String payload, String description) {
+    if (webSocket == null || !isConnected) {
+        return false;
+    }
+    try {
+        webSocket.send(payload);
+        log("消息发送成功: " + description);
+        return true;
+    } catch (Exception e) {
+        log("消息直发失败，转入队列: " + description + " - " + e.getMessage());
+        return false;
+    }
+}
+
 // ============================================================
 // 消息处理
 // ============================================================
@@ -576,15 +590,18 @@ void onHandleMsg(Object msgInfoBean) {
 
         msg.put("data", data);
 
-        // 通过队列发送，支持重试
+        // 连接正常时优先直发；失败或未连接时再入队重试
         String contentPreview = content;
         if (contentPreview.length() > 30) {
             contentPreview = contentPreview.substring(0, 30) + "...";
         }
         String description = sender + " -> " + contentPreview;
 
-        if (enqueueMessage(msg.toString(), description)) {
-            log("消息入队: " + description);
+        String payload = msg.toString();
+        if (!sendMessageDirectly(payload, description)) {
+            if (enqueueMessage(payload, description)) {
+                log("消息入队: " + description);
+            }
         }
     } catch (Exception e) {
         log("消息处理失败: " + e.getMessage());
