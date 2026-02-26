@@ -11,6 +11,8 @@ import {
   isGroupChatAllowed,
   isNoMentionContextGroupEnabled,
   isSenderAllowed,
+  normalizeSenderId,
+  normalizeWapMessagingTarget,
   resolveAllowFrom,
   resolveGroupAllowChats,
   resolveGroupAllowFrom,
@@ -56,6 +58,29 @@ type PendingGroupHistoryEntry = {
 };
 
 const pendingGroupHistories = new Map<string, PendingGroupHistoryEntry[]>();
+
+function buildDmSenderCandidates(msgData: WapMessageData, dmPeerId: string): string[] {
+  const raw = [
+    dmPeerId,
+    msgData.sender,
+    msgData.talker,
+    normalizeWapMessagingTarget(msgData.sender),
+    normalizeWapMessagingTarget(msgData.talker),
+  ]
+    .map((entry) => String(entry ?? "").trim())
+    .filter((entry) => entry.length > 0);
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const key = entry.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(entry);
+  }
+  return deduped;
+}
 
 function buildPendingHistoryKey(accountId: string, talker: string): string {
   return `${accountId}:${talker.trim().toLowerCase()}`;
@@ -145,6 +170,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
     "unknown";
   const accountId = resolveAccountId(req);
   const account = resolveWapAccount(api.config, accountId);
+  const resolvedAccountId = account.accountId;
 
   if (!account.enabled) {
     api.logger.warn(`WAP connection rejected for disabled account ${accountId} from ${ip}`);
@@ -168,10 +194,10 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
     return null;
   }
 
-  const clientId = `wap-${accountId}-${Date.now()}`;
+  const clientId = `wap-${resolvedAccountId}-${Date.now()}`;
   clients.set(clientId, {
     ws,
-    accountId,
+    accountId: resolvedAccountId,
     account,
     ip,
     connectedAt: new Date(),
@@ -203,7 +229,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
     }),
   );
 
-  api.logger.info(`WAP client connected: ${clientId} from ${ip} (account: ${accountId})`);
+  api.logger.info(`WAP client connected: ${clientId} from ${ip} (account: ${resolvedAccountId})`);
   return clientId;
 }
 
@@ -275,6 +301,11 @@ async function processWapInboundMessage(params: {
   const isGroup = msgData.is_group;
   const kind: "dm" | "group" = isGroup ? "group" : "dm";
   const chatType = isGroup ? "group" : "direct";
+  const normalizedTalker = normalizeWapMessagingTarget(msgData.talker);
+  const normalizedSender = normalizeWapMessagingTarget(msgData.sender);
+  const dmPeerId = normalizeSenderId(normalizedTalker || normalizedSender || msgData.sender);
+  const senderIdForPolicy = isGroup ? msgData.sender : dmPeerId;
+  const dmSenderCandidates = isGroup ? [] : buildDmSenderCandidates(msgData, dmPeerId);
   const dmPolicy = client.account.config.dmPolicy ?? "pairing";
   const allowFrom = resolveAllowFrom(client.account.config);
   const groupPolicy = resolveGroupPolicy(client.account.config);
@@ -284,15 +315,15 @@ async function processWapInboundMessage(params: {
   const noMentionContextHistoryLimit = resolveNoMentionContextHistoryLimit(client.account.config);
   const storeAllowFrom = isGroup
     ? []
-    : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, client.accountId);
+    : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, undefined, client.accountId);
   const effectiveDmAllowFrom =
     dmPolicy === "allowlist" ? allowFrom : [...allowFrom, ...storeAllowFrom];
   const configuredAllowFrom = isGroup ? groupAllowFrom : effectiveDmAllowFrom;
-  const senderAllowed = isSenderAllowed(
-    msgData.sender,
-    configuredAllowFrom,
-    isGroup ? true : dmPolicy === "open",
-  );
+  const senderAllowed = isGroup
+    ? isSenderAllowed(senderIdForPolicy, configuredAllowFrom, true)
+    : dmSenderCandidates.some((candidate) =>
+        isSenderAllowed(candidate, configuredAllowFrom, dmPolicy === "open"),
+      );
 
   if (isGroup) {
     if (!isGroupChatAllowed(msgData.talker, groupPolicy, groupAllowChats)) {
@@ -333,16 +364,19 @@ async function processWapInboundMessage(params: {
       return;
     }
     if (dmPolicy !== "open" && !senderAllowed) {
+      api.logger.info(
+        `WAP DM auth miss sender=${msgData.sender} talker=${msgData.talker} peer=${dmPeerId} candidates=${dmSenderCandidates.join("|")} allow=${configuredAllowFrom.join("|")} account=${client.accountId}`,
+      );
       if (dmPolicy === "pairing") {
         const silentPairing = client.account.config.silentPairing ?? true;
         const request = await core.channel.pairing.upsertPairingRequest({
           channel: CHANNEL_ID,
-          id: msgData.sender,
+          id: dmPeerId,
           accountId: client.accountId,
-          meta: { name: msgData.sender },
+          meta: { name: msgData.sender, talker: msgData.talker, candidates: dmSenderCandidates.join(",") },
         });
         api.logger.info(
-          `WAP pairing request sender=${msgData.sender} account=${client.accountId} created=${request.created}`,
+          `WAP pairing request sender=${dmPeerId} account=${client.accountId} created=${request.created}`,
         );
         if (!silentPairing && request.created && ws.readyState === WebSocket.OPEN) {
           ws.send(
@@ -352,7 +386,7 @@ async function processWapInboundMessage(params: {
                 talker: msgData.talker,
                 content: core.channel.pairing.buildPairingReply({
                   channel: CHANNEL_ID,
-                  idLine: `Your WeChat id: ${msgData.sender}`,
+                  idLine: `Your WeChat id: ${dmPeerId}`,
                   code: request.code,
                 }),
               },
@@ -370,11 +404,13 @@ async function processWapInboundMessage(params: {
     isGroup,
     dmPolicy,
     configuredAllowFrom,
-    senderId: msgData.sender,
+    senderId: senderIdForPolicy,
     isSenderAllowed: (senderId, effectiveAllowFrom) =>
       isSenderAllowed(senderId, effectiveAllowFrom, isGroup ? true : dmPolicy === "open"),
     readAllowFromStore: async () =>
-      isGroup ? [] : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, client.accountId),
+      isGroup
+        ? []
+        : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, undefined, client.accountId),
     shouldComputeCommandAuthorized: (rawBody, config) =>
       core.channel.commands.shouldComputeCommandAuthorized(rawBody, config),
     resolveCommandAuthorizedFromAuthorizers: (authParams) =>
@@ -405,14 +441,14 @@ async function processWapInboundMessage(params: {
     direction: "inbound",
   });
 
-  const fromLabel = isGroup ? `${msgData.sender} in ${msgData.talker}` : msgData.sender;
+  const fromLabel = isGroup ? `${msgData.sender} in ${msgData.talker}` : dmPeerId;
   const body = core.channel.reply.formatInboundEnvelope({
     channel: "WeChat",
     from: fromLabel,
     timestamp: msgData.timestamp,
     body: `${bodyText}\n\n${wechatContextHint}`,
     chatType,
-    sender: { name: msgData.sender, id: msgData.sender },
+    sender: { name: msgData.sender, id: senderIdForPolicy },
   });
   let combinedBody = body;
   if (isGroup) {
@@ -439,7 +475,7 @@ async function processWapInboundMessage(params: {
     Body: combinedBody,
     RawBody: bodyText,
     CommandBody: bodyText,
-    From: isGroup ? `${CHANNEL_ID}:group:${msgData.talker}` : `${CHANNEL_ID}:${msgData.sender}`,
+    From: isGroup ? `${CHANNEL_ID}:group:${msgData.talker}` : `${CHANNEL_ID}:${dmPeerId}`,
     To: msgData.talker,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
@@ -447,7 +483,7 @@ async function processWapInboundMessage(params: {
     ConversationLabel: fromLabel,
     GroupSubject: isGroup ? msgData.talker : undefined,
     SenderName: msgData.sender,
-    SenderId: msgData.sender,
+    SenderId: senderIdForPolicy,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     MessageSid: String(msgData.msg_id),

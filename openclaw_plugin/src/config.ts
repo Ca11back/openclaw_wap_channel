@@ -149,7 +149,11 @@ export function resolveNoMentionContextHistoryLimit(config: WapAccountConfig): n
 }
 
 export function normalizeSenderId(raw: string): string {
-  return raw.trim().toLowerCase();
+  return normalizeWapMessagingTarget(raw)
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    .trim()
+    .toLowerCase();
 }
 
 export function normalizeWapMessagingTarget(raw: string): string {
