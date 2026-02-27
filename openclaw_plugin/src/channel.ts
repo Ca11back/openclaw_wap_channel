@@ -27,6 +27,11 @@ function getAccountClientCount(accountId: string): number {
   return getClientStats().filter((client) => client.accountId === accountId).length;
 }
 
+function isAccountConfigured(account: WapAccount): boolean {
+  const token = account.config.authToken ?? process.env.WAP_AUTH_TOKEN;
+  return typeof token === "string" && token.trim().length > 0;
+}
+
 function resolvePolicyPath(cfg: OpenClawConfig, account: WapAccount): string {
   if (hasExplicitAccount(cfg, account.accountId)) {
     return `channels.${CHANNEL_ID}.accounts.${account.accountId}.`;
@@ -62,14 +67,14 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     listAccountIds: (cfg) => listWapAccountIds(cfg),
     resolveAccount: (cfg, accountId) => resolveWapAccount(cfg, accountId),
     defaultAccountId: () => DEFAULT_ACCOUNT_ID,
-    isConfigured: (account) => getAccountClientCount(account.accountId) > 0,
+    isConfigured: (account) => isAccountConfigured(account),
     describeAccount: (account) => {
       const allowFrom = resolveAllowFrom(account.config);
       return {
         accountId: account.accountId,
         name: account.name,
         enabled: account.enabled,
-        configured: getAccountClientCount(account.accountId) > 0,
+        configured: isAccountConfigured(account),
         connectedClients: getAccountClientCount(account.accountId),
         dmPolicy: account.config.dmPolicy ?? "pairing",
         groupPolicy: resolveGroupPolicy(account.config),
@@ -225,7 +230,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
         accountId: account.accountId,
         name: account.name,
         enabled: account.enabled,
-        configured: accountClients > 0,
+        configured: isAccountConfigured(account),
         running: runtime?.running ?? accountClients > 0,
         connectedClients: accountClients,
         lastStartAt: runtime?.lastStartAt ?? null,
