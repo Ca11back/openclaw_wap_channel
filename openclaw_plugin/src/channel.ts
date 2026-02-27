@@ -14,7 +14,14 @@ import {
   type WapAccount,
   wapChannelConfigSchema,
 } from "./config.js";
-import { buildWapMediaCommand, getClientCount, getClientStats, getWapRuntime, sendToClient } from "./ws-server.js";
+import {
+  buildWapMediaCommand,
+  getClientCount,
+  getClientStats,
+  getWapRuntime,
+  resolveTargetViaClient,
+  sendToClient,
+} from "./ws-server.js";
 
 function getAccountClientCount(accountId: string): number {
   return getClientStats().filter((client) => client.accountId === accountId).length;
@@ -113,10 +120,24 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       const runtime = getWapRuntime();
       const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
       const normalizedTarget = normalizeWapMessagingTarget(to);
+      const resolvedTarget = await resolveTargetViaClient({
+        target: normalizedTarget,
+        accountId: effectiveAccountId,
+      });
+      if (!resolvedTarget.ok) {
+        runtime?.logger.warn(
+          `WAP sendText target resolve failed account=${effectiveAccountId} target=${normalizedTarget}: ${resolvedTarget.error}`,
+        );
+        return {
+          ok: false,
+          error: resolvedTarget.error,
+          channel: CHANNEL_ID,
+        };
+      }
       const sent = sendToClient(
         {
           type: "send_text",
-          data: { talker: normalizedTarget, content: text },
+          data: { talker: resolvedTarget.talker, content: text },
         },
         effectiveAccountId,
       );
@@ -130,7 +151,9 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
           channel: CHANNEL_ID,
         };
       }
-      runtime?.logger.debug(`WAP sendText to ${normalizedTarget}: ${text.substring(0, 50)}...`);
+      runtime?.logger.debug(
+        `WAP sendText to ${resolvedTarget.talker} (from ${normalizedTarget}): ${text.substring(0, 50)}...`,
+      );
       return { ok: true, channel: CHANNEL_ID };
     },
     sendMedia: async ({ to, text, mediaUrl, accountId }) => {
@@ -144,9 +167,23 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       }
       const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
       const normalizedTarget = normalizeWapMessagingTarget(to);
+      const resolvedTarget = await resolveTargetViaClient({
+        target: normalizedTarget,
+        accountId: effectiveAccountId,
+      });
+      if (!resolvedTarget.ok) {
+        runtime?.logger.warn(
+          `WAP sendMedia target resolve failed account=${effectiveAccountId} target=${normalizedTarget}: ${resolvedTarget.error}`,
+        );
+        return {
+          ok: false,
+          error: resolvedTarget.error,
+          channel: CHANNEL_ID,
+        };
+      }
       const command = await buildWapMediaCommand({
         source: mediaUrl,
-        talker: normalizedTarget,
+        talker: resolvedTarget.talker,
         accountId: effectiveAccountId,
         caption: text || undefined,
       });
@@ -168,7 +205,9 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
           channel: CHANNEL_ID,
         };
       }
-      runtime?.logger.debug(`WAP sendMedia to ${normalizedTarget}: ${mediaUrl}`);
+      runtime?.logger.debug(
+        `WAP sendMedia to ${resolvedTarget.talker} (from ${normalizedTarget}): ${mediaUrl}`,
+      );
       return { ok: true, channel: CHANNEL_ID };
     },
   },

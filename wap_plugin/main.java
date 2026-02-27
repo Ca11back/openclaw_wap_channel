@@ -1140,6 +1140,40 @@ String resolveAndValidateOutboundTalker(String rawTalker, String commandType) {
     return resolvedTalker;
 }
 
+String validateCanonicalOutboundTalker(String rawTalker, String commandType) {
+    String talker = normalizeTargetText(rawTalker).trim();
+    if (talker.isEmpty()) {
+        log(commandType + " 缺少目标 talker");
+        return null;
+    }
+    // send_* 仅接受解析后的 canonical talker，禁止在发送阶段做昵称/备注匹配
+    if (startsWithIgnoreCase(talker, "group:") ||
+        startsWithIgnoreCase(talker, "room:") ||
+        startsWithIgnoreCase(talker, "chatroom:") ||
+        startsWithIgnoreCase(talker, "friend:") ||
+        startsWithIgnoreCase(talker, "user:") ||
+        startsWithIgnoreCase(talker, "contact:") ||
+        startsWithIgnoreCase(talker, "remark:") ||
+        startsWithIgnoreCase(talker, "nickname:") ||
+        startsWithIgnoreCase(talker, "name:") ||
+        startsWithIgnoreCase(talker, "id:") ||
+        startsWithIgnoreCase(talker, "wxid:")) {
+        log(commandType + " 仅接受 canonical talker（wxid 或 @chatroom），当前为待解析目标: " + rawTalker);
+        return null;
+    }
+
+    boolean isGroupTalker = looksLikeGroupTalker(talker);
+    if (!isGroupTalker && !isFriendWxid(talker)) {
+        log("【安全】拒绝发送私聊：目标不是当前账号好友或非 canonical wxid: " + talker);
+        return null;
+    }
+    if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(talker))) {
+        log("【安全】拒绝发送消息到非 allowFrom 用户: " + talker);
+        return null;
+    }
+    return talker;
+}
+
 boolean isHttpUrl(String rawUrl) {
     if (rawUrl == null) {
         return false;
@@ -1319,6 +1353,33 @@ File getPendingFilesDir() {
 // 处理服务器指令
 // ============================================================
 
+void sendResolveTargetResult(String requestId, String target, String resolvedTalker, String targetKind, String errorMessage) {
+    try {
+        if (webSocket == null || !isConnected) {
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        payload.put("type", "resolve_target_result");
+
+        JSONObject data = new JSONObject();
+        data.put("request_id", requestId == null ? "" : requestId);
+        data.put("target", target == null ? "" : target);
+
+        boolean ok = resolvedTalker != null && !resolvedTalker.trim().isEmpty() && (errorMessage == null || errorMessage.trim().isEmpty());
+        data.put("ok", ok);
+        data.put("target_kind", targetKind == null || targetKind.trim().isEmpty() ? "unknown" : targetKind);
+        if (ok) {
+            data.put("resolved_talker", resolvedTalker);
+        } else {
+            data.put("error", errorMessage == null || errorMessage.trim().isEmpty() ? "target resolve failed" : errorMessage);
+        }
+        payload.put("data", data);
+        webSocket.send(payload.toString());
+    } catch (Exception e) {
+        log("resolve_target_result 回传失败: " + e.getMessage());
+    }
+}
+
 void handleServerMessage(String text) {
     try {
         JSONObject msg = JSON.parseObject(text);
@@ -1401,6 +1462,33 @@ void handleServerMessage(String text) {
             return;
         }
 
+        // 仅解析目标，不发送消息（供服务端在发送前构造稳定 session）
+        if ("resolve_target".equals(type)) {
+            JSONObject data = msg.getJSONObject("data");
+            if (data == null) {
+                log("resolve_target 指令缺少 data");
+                return;
+            }
+            String requestId = data.getString("request_id");
+            String target = data.getString("target");
+            if (requestId == null || requestId.trim().isEmpty()) {
+                log("resolve_target 指令缺少 request_id");
+                return;
+            }
+            if (target == null || target.trim().isEmpty()) {
+                sendResolveTargetResult(requestId, target, null, "unknown", "target is required");
+                return;
+            }
+            String resolvedTalker = resolveAndValidateOutboundTalker(target, "resolve_target");
+            if (resolvedTalker == null) {
+                sendResolveTargetResult(requestId, target, null, "unknown", "target resolve failed");
+                return;
+            }
+            String targetKind = resolvedTalker.endsWith("@chatroom") ? "group" : "direct";
+            sendResolveTargetResult(requestId, target, resolvedTalker, targetKind, null);
+            return;
+        }
+
         // 发送文本消息
         if ("send_text".equals(type)) {
             JSONObject data = msg.getJSONObject("data");
@@ -1416,22 +1504,24 @@ void handleServerMessage(String text) {
                 return;
             }
 
-            String resolvedTalker = resolveAndValidateOutboundTalker(talker, "send_text");
-            if (resolvedTalker == null) {
+            String canonicalTalker = validateCanonicalOutboundTalker(talker, "send_text");
+            if (canonicalTalker == null) {
                 return;
             }
             if (!checkAndIncreaseSendRateLimit()) {
                 return;
             }
 
-            boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
-            String outboundContent = isGroupTalker ? renderGroupMentionTemplates(resolvedTalker, content) : content;
-            sendText(resolvedTalker, outboundContent);
+            boolean isGroupTalker = canonicalTalker.endsWith("@chatroom");
+            String outboundContent = isGroupTalker
+                ? renderGroupMentionTemplates(canonicalTalker, content)
+                : content;
+            sendText(canonicalTalker, outboundContent);
             String preview = outboundContent;
             if (preview.length() > 30) {
                 preview = preview.substring(0, 30) + "...";
             }
-            log("已发送消息到 " + resolvedTalker + ": " + preview);
+            log("已发送消息到 " + canonicalTalker + ": " + preview);
             return;
         }
 
@@ -1457,8 +1547,8 @@ void handleServerMessage(String text) {
                 log("send_image 仅支持 http(s) URL: " + imageUrl);
                 return;
             }
-            String resolvedTalker = resolveAndValidateOutboundTalker(talker, "send_image");
-            if (resolvedTalker == null) {
+            String canonicalTalker = validateCanonicalOutboundTalker(talker, "send_image");
+            if (canonicalTalker == null) {
                 return;
             }
             if (!checkAndIncreaseSendRateLimit()) {
@@ -1469,14 +1559,14 @@ void handleServerMessage(String text) {
                 log("send_image 下载失败: " + imageUrl);
                 return;
             }
-            sendImage(resolvedTalker, imageFile.getAbsolutePath());
+            sendImage(canonicalTalker, imageFile.getAbsolutePath());
             if (caption != null && !caption.trim().isEmpty()) {
-                String outboundCaption = resolvedTalker.endsWith("@chatroom")
-                    ? renderGroupMentionTemplates(resolvedTalker, caption)
+                String outboundCaption = canonicalTalker.endsWith("@chatroom")
+                    ? renderGroupMentionTemplates(canonicalTalker, caption)
                     : caption;
-                sendText(resolvedTalker, outboundCaption);
+                sendText(canonicalTalker, outboundCaption);
             }
-            log("已发送图片到 " + resolvedTalker + ": " + imageFile.getName());
+            log("已发送图片到 " + canonicalTalker + ": " + imageFile.getName());
             return;
         }
 
@@ -1503,8 +1593,8 @@ void handleServerMessage(String text) {
                 log("send_file 仅支持 http(s) URL: " + fileUrl);
                 return;
             }
-            String resolvedTalker = resolveAndValidateOutboundTalker(talker, "send_file");
-            if (resolvedTalker == null) {
+            String canonicalTalker = validateCanonicalOutboundTalker(talker, "send_file");
+            if (canonicalTalker == null) {
                 return;
             }
             if (!checkAndIncreaseSendRateLimit()) {
@@ -1516,14 +1606,14 @@ void handleServerMessage(String text) {
                 log("send_file 下载/落地失败: " + fileUrl);
                 return;
             }
-            shareFile(resolvedTalker, title, localFile.getAbsolutePath(), "");
+            shareFile(canonicalTalker, title, localFile.getAbsolutePath(), "");
             if (caption != null && !caption.trim().isEmpty()) {
-                String outboundCaption = resolvedTalker.endsWith("@chatroom")
-                    ? renderGroupMentionTemplates(resolvedTalker, caption)
+                String outboundCaption = canonicalTalker.endsWith("@chatroom")
+                    ? renderGroupMentionTemplates(canonicalTalker, caption)
                     : caption;
-                sendText(resolvedTalker, outboundCaption);
+                sendText(canonicalTalker, outboundCaption);
             }
-            log("已发送文件到 " + resolvedTalker + ": " + localFile.getName());
+            log("已发送文件到 " + canonicalTalker + ": " + localFile.getName());
             return;
         }
 

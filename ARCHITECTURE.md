@@ -29,10 +29,10 @@
 
 ### 发送 AI 回复
 1. OpenClaw AI 生成回复
-2. Channel 通过 WebSocket 发送 `send_text` 指令
-3. WAuxiliary 插件接收指令
-4. 插件验证白名单和速率限制
-5. 调用微信 API 发送消息
+2. Channel 通过 WebSocket 发送 `resolve_target` 预解析目标
+3. WAuxiliary 返回 `resolve_target_result`（最终 wxid / 群 talker）
+4. Channel 使用解析后的目标发送 `send_text` / `send_image` / `send_file`
+5. WAuxiliary 插件接收指令并调用微信 API 发送消息
 
 ## 🔒 安全机制
 

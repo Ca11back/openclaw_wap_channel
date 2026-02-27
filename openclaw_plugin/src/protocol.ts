@@ -24,7 +24,19 @@ export interface WapHeartbeatPayload {
     type: "heartbeat";
 }
 
-export type WapUpstreamMessage = WapMessagePayload | WapHeartbeatPayload;
+export interface WapResolveTargetResultPayload {
+    type: "resolve_target_result";
+    data: {
+        request_id: string;
+        target: string;
+        ok: boolean;
+        resolved_talker?: string;
+        target_kind?: "direct" | "group" | "unknown";
+        error?: string;
+    };
+}
+
+export type WapUpstreamMessage = WapMessagePayload | WapHeartbeatPayload | WapResolveTargetResultPayload;
 
 // ============================================================
 // 下行指令 (Server → Android)
@@ -40,6 +52,14 @@ export interface WapSendTextCommand {
 
 export interface WapPongCommand {
     type: "pong";
+}
+
+export interface WapResolveTargetCommand {
+    type: "resolve_target";
+    data: {
+        request_id: string;
+        target: string;
+    };
 }
 
 export interface WapConfigCommand {
@@ -93,6 +113,7 @@ export interface WapSendVoiceCommand {
 export type WapDownstreamCommand =
     | WapSendTextCommand
     | WapPongCommand
+    | WapResolveTargetCommand
     | WapConfigCommand
     | WapSendImageCommand
     | WapSendFileCommand

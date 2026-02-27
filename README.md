@@ -164,6 +164,35 @@ message_ttl_ms: 30000
 }
 ```
 
+下行 `resolve_target` 示例（发送前目标预解析）：
+
+```json
+{
+  "type": "resolve_target",
+  "data": {
+    "request_id": "a9f6c2f3-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "target": "friend:HH"
+  }
+}
+```
+
+上行 `resolve_target_result` 示例：
+
+```json
+{
+  "type": "resolve_target_result",
+  "data": {
+    "request_id": "a9f6c2f3-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "target": "friend:HH",
+    "ok": true,
+    "resolved_talker": "wxid_xxx",
+    "target_kind": "direct"
+  }
+}
+```
+
+说明：`send_text` / `send_image` / `send_file` 的 `talker` 仅应传入 canonical 标识（好友 `wxid` 或群 `*@chatroom`）。昵称/备注/关键字目标需先通过 `resolve_target` 解析。
+
 下行 `send_text` 示例：
 
 ```json
