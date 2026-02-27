@@ -1370,8 +1370,10 @@ void sendResolveTargetResult(String requestId, String target, String resolvedTal
         data.put("target_kind", targetKind == null || targetKind.trim().isEmpty() ? "unknown" : targetKind);
         if (ok) {
             data.put("resolved_talker", resolvedTalker);
+            log("resolve_target_result 回传: request_id=" + requestId + ", target=" + target + ", resolved_talker=" + resolvedTalker + ", kind=" + targetKind + ", ok=true");
         } else {
             data.put("error", errorMessage == null || errorMessage.trim().isEmpty() ? "target resolve failed" : errorMessage);
+            log("resolve_target_result 回传: request_id=" + requestId + ", target=" + target + ", kind=" + targetKind + ", ok=false, error=" + data.getString("error"));
         }
         payload.put("data", data);
         webSocket.send(payload.toString());
@@ -1384,6 +1386,9 @@ void handleServerMessage(String text) {
     try {
         JSONObject msg = JSON.parseObject(text);
         String type = msg.getString("type");
+        if ("resolve_target".equals(type) || "send_text".equals(type) || "send_image".equals(type) || "send_file".equals(type)) {
+            log("收到服务端指令 type=" + type);
+        }
 
         // 心跳响应
         if ("pong".equals(type)) {
@@ -1471,6 +1476,7 @@ void handleServerMessage(String text) {
             }
             String requestId = data.getString("request_id");
             String target = data.getString("target");
+            log("resolve_target 开始 request_id=" + requestId + ", target=" + target);
             if (requestId == null || requestId.trim().isEmpty()) {
                 log("resolve_target 指令缺少 request_id");
                 return;

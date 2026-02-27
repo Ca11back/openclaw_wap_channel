@@ -164,35 +164,32 @@ export function normalizeWapMessagingTarget(raw: string): string {
   return trimmed.replace(/^(wechat|wx|wap):/i, "").trim();
 }
 
+function stripWapExplicitPrefix(target: string): string {
+  const prefixed = target.match(/^(user|direct|friend|group):(.+)$/i);
+  if (!prefixed) {
+    return target;
+  }
+  return prefixed[2]?.trim() ?? "";
+}
+
 export function looksLikeWapTargetId(raw: string): boolean {
   const normalized = normalizeWapMessagingTarget(raw);
   if (!normalized) {
     return false;
   }
-  const lower = normalized.toLowerCase();
-  if (
-    lower.startsWith("group:") ||
-    lower.startsWith("room:") ||
-    lower.startsWith("chatroom:") ||
-    lower.startsWith("friend:") ||
-    lower.startsWith("user:") ||
-    lower.startsWith("contact:") ||
-    lower.startsWith("remark:") ||
-    lower.startsWith("nickname:") ||
-    lower.startsWith("name:") ||
-    lower.startsWith("id:") ||
-    lower.startsWith("wxid:")
-  ) {
-    return true;
-  }
-  if (normalized.endsWith("@chatroom")) {
-    return true;
-  }
-  if (/^wxid_[A-Za-z0-9_-]+$/.test(normalized)) {
-    return true;
-  }
-  // Allow plain names (e.g. short aliases like "HH") and resolve them on WAuxiliary side.
-  return normalized.length > 0;
+  return isCanonicalWapTarget(stripWapExplicitPrefix(normalized));
+}
+
+function isCanonicalDirectTarget(target: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(target);
+}
+
+function isCanonicalGroupTarget(target: string): boolean {
+  return /^[A-Za-z0-9_-]+@chatroom$/i.test(target);
+}
+
+function isCanonicalWapTarget(target: string): boolean {
+  return isCanonicalDirectTarget(target) || isCanonicalGroupTarget(target);
 }
 
 export function resolveWapOutboundTarget(params: {
@@ -203,12 +200,31 @@ export function resolveWapOutboundTarget(params: {
   const mode = params.mode ?? "explicit";
   const explicitTarget = params.to ? normalizeWapMessagingTarget(params.to) : "";
   if (explicitTarget) {
+    const prefixed = /^(user|direct|friend|group):/i.test(explicitTarget);
+    if (mode === "explicit" && !prefixed) {
+      return {
+        ok: false,
+        error: new Error(
+          "Invalid WeChat target. Send requires typed canonical target: <user:direct_id> or <group:group_id@chatroom>.",
+        ),
+      };
+    }
+    const canonicalTarget = stripWapExplicitPrefix(explicitTarget);
+    if (!isCanonicalWapTarget(canonicalTarget)) {
+      return {
+        ok: false,
+        error: new Error(
+          "Invalid WeChat target. Send only supports canonical id: <user:direct_id> or <group:group_id@chatroom>. Use message action=search first.",
+        ),
+      };
+    }
+    // Keep typed target (user:/group:) for downstream routing in core.
     return { ok: true, to: explicitTarget };
   }
 
   const normalizedAllowFrom = (params.allowFrom ?? [])
     .map((entry) => normalizeWapMessagingTarget(String(entry)))
-    .filter((entry): entry is string => Boolean(entry));
+    .filter((entry): entry is string => isCanonicalWapTarget(entry));
   const fallbackTarget = normalizedAllowFrom[0];
   if (mode !== "explicit" && fallbackTarget) {
     return { ok: true, to: fallbackTarget };
@@ -217,7 +233,7 @@ export function resolveWapOutboundTarget(params: {
   return {
     ok: false,
     error: new Error(
-      `Missing WeChat target. Provide ${mode === "explicit" ? "--to <wxid|group:群名|friend:备注>" : "wxid/group:群名/friend:备注"}.`,
+      `Missing WeChat target. Provide ${mode === "explicit" ? "--to <user:direct_id|group:group_id@chatroom>" : "user:direct_id/group:group_id@chatroom"}.`,
     ),
   };
 }

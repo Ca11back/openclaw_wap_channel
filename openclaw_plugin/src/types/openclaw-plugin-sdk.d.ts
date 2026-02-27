@@ -71,6 +71,20 @@ declare module "openclaw/plugin-sdk" {
         hint?: string;
       };
     };
+    actions?: {
+      listActions?: (params: { cfg: OpenClawConfig }) => string[];
+      supportsAction?: (params: { action: string }) => boolean;
+      extractToolSend?: (params: {
+        args: Record<string, unknown>;
+      }) => { to: string; accountId?: string | null } | null;
+      handleAction?: (ctx: {
+        channel: string;
+        action: string;
+        cfg: OpenClawConfig;
+        params: Record<string, unknown>;
+        accountId?: string | null;
+      }) => Promise<unknown>;
+    };
     outbound?: {
       deliveryMode: "direct" | "gateway" | "hybrid";
       textChunkLimit?: number;
