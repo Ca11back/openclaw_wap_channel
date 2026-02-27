@@ -173,7 +173,7 @@ function buildDmSenderCandidates(msgData: WapMessageData, dmPeerId: string): str
 }
 
 function buildPendingHistoryKey(accountId: string, talker: string): string {
-  return `${accountId}:${talker.trim().toLowerCase()}`;
+  return `${accountId}:${String(talker ?? "").trim().toLowerCase()}`;
 }
 
 function appendPendingHistory(
@@ -199,6 +199,30 @@ function consumePendingHistory(accountId: string, talker: string): PendingGroupH
   const list = pendingGroupHistories.get(key) ?? [];
   pendingGroupHistories.delete(key);
   return list;
+}
+
+async function readAllowFromStoreCompat(params: {
+  pairing: OpenClawPluginApi["runtime"]["channel"]["pairing"];
+  channel: string;
+  accountId: string;
+}): Promise<string[]> {
+  const { pairing, channel, accountId } = params;
+  const readAllowFromStore = pairing.readAllowFromStore as unknown as
+    | ((input: { channel: string; accountId: string }) => Promise<string[]>)
+    | ((channel: string, accountId?: string) => Promise<string[]>);
+  try {
+    // Newer OpenClaw runtime expects object-form parameters.
+    return await (readAllowFromStore as (input: { channel: string; accountId: string }) => Promise<string[]>)({
+      channel,
+      accountId,
+    });
+  } catch {
+    // Fallback for older SDK signatures.
+    return await (readAllowFromStore as (channel: string, accountId?: string) => Promise<string[]>)(
+      channel,
+      accountId,
+    );
+  }
 }
 
 export function setWapRuntime(api: OpenClawPluginApi) {
@@ -370,7 +394,10 @@ function settlePendingTargetResolve(
 }
 
 function handleResolveTargetResult(clientId: string, msg: WapResolveTargetResultPayload, api: OpenClawPluginApi) {
-  const requestId = msg.data.request_id.trim();
+  const requestId =
+    typeof msg.data?.request_id === "string"
+      ? msg.data.request_id.trim()
+      : "";
   if (!requestId) {
     api.logger.warn(`WAP resolve_target_result missing request_id from ${clientId}`);
     return;
@@ -600,7 +627,8 @@ async function handleMessage(
       ws: client.ws,
     });
   } catch (err) {
-    api.logger.error(`Failed to handle WAP message: ${String(err)}`);
+    const detail = err instanceof Error ? `${err.stack ?? err.message}` : String(err);
+    api.logger.error(`Failed to handle WAP message: ${detail}`);
   }
 }
 
@@ -613,7 +641,7 @@ async function processWapInboundMessage(params: {
   const { api, client, msgData, ws } = params;
   const core = api.runtime;
   const cfg = api.config;
-  const bodyText = msgData.content.trim();
+  const bodyText = typeof msgData.content === "string" ? msgData.content.trim() : "";
   if (!bodyText) {
     return;
   }
@@ -621,8 +649,10 @@ async function processWapInboundMessage(params: {
   const isGroup = msgData.is_group;
   const kind: "dm" | "group" = isGroup ? "group" : "dm";
   const chatType = isGroup ? "group" : "direct";
-  const normalizedTalker = normalizeWapMessagingTarget(msgData.talker);
-  const normalizedSender = normalizeWapMessagingTarget(msgData.sender);
+  const normalizedTalker =
+    typeof msgData.talker === "string" ? normalizeWapMessagingTarget(msgData.talker) : "";
+  const normalizedSender =
+    typeof msgData.sender === "string" ? normalizeWapMessagingTarget(msgData.sender) : "";
   const dmPeerId = normalizeSenderId(normalizedTalker || normalizedSender || msgData.sender);
   const groupPeerId = normalizedTalker || normalizeWapMessagingTarget(msgData.talker);
   const routePeerId = isGroup ? groupPeerId : dmPeerId;
@@ -643,7 +673,11 @@ async function processWapInboundMessage(params: {
   const noMentionContextHistoryLimit = resolveNoMentionContextHistoryLimit(client.account.config);
   const storeAllowFrom = isGroup
     ? []
-    : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, undefined, client.accountId);
+    : await readAllowFromStoreCompat({
+        pairing: core.channel.pairing,
+        channel: CHANNEL_ID,
+        accountId: client.accountId,
+      });
   const effectiveDmAllowFrom =
     dmPolicy === "allowlist" ? allowFrom : [...allowFrom, ...storeAllowFrom];
   const configuredAllowFrom = isGroup ? groupAllowFrom : effectiveDmAllowFrom;
@@ -738,7 +772,11 @@ async function processWapInboundMessage(params: {
     readAllowFromStore: async () =>
       isGroup
         ? []
-        : await core.channel.pairing.readAllowFromStore(CHANNEL_ID, undefined, client.accountId),
+        : await readAllowFromStoreCompat({
+            pairing: core.channel.pairing,
+            channel: CHANNEL_ID,
+            accountId: client.accountId,
+          }),
     shouldComputeCommandAuthorized: (rawBody, config) =>
       core.channel.commands.shouldComputeCommandAuthorized(rawBody, config),
     resolveCommandAuthorizedFromAuthorizers: (authParams) =>
@@ -839,12 +877,13 @@ async function processWapInboundMessage(params: {
 
         if (mediaList.length > 0) {
           for (const mediaUrl of mediaList) {
-            if (!mediaUrl || !mediaUrl.trim()) {
+            const mediaSource = typeof mediaUrl === "string" ? mediaUrl.trim() : "";
+            if (!mediaSource) {
               api.logger.warn("WAP skip empty media source in reply");
               continue;
             }
             const command = await buildWapMediaCommand({
-              source: mediaUrl,
+              source: mediaSource,
               talker: msgData.talker,
               accountId: client.accountId,
               caption: replyText || undefined,
