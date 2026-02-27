@@ -19,6 +19,8 @@ import java.io.InputStream;
 import java.io.FileOutputStream;
 import java.net.URL;
 import java.net.URLConnection;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 // ============================================================
 // 配置区域 - 请根据实际情况修改
@@ -1184,19 +1186,95 @@ String sanitizeFileName(String rawName, String fallback) {
     return name;
 }
 
+String resolveServerHttpOrigin() {
+    try {
+        URL wsUrl = new URL(SERVER_URL);
+        String protocol = wsUrl.getProtocol();
+        String httpProtocol = "wss".equalsIgnoreCase(protocol) ? "https" : "http";
+        String host = wsUrl.getHost();
+        int port = wsUrl.getPort();
+        if (host == null || host.trim().isEmpty()) {
+            return null;
+        }
+        StringBuilder origin = new StringBuilder();
+        origin.append(httpProtocol).append("://").append(host.trim());
+        if (port > 0) {
+            origin.append(":").append(port);
+        }
+        return origin.toString();
+    } catch (Exception e) {
+        log("解析 server_url 失败: " + e.getMessage());
+        return null;
+    }
+}
+
+String resolveServerPathPrefix() {
+    try {
+        URL wsUrl = new URL(SERVER_URL);
+        String rawPath = wsUrl.getPath();
+        if (rawPath == null || rawPath.trim().isEmpty() || "/".equals(rawPath.trim())) {
+            return "";
+        }
+        String pathValue = rawPath.trim();
+        if (pathValue.endsWith("/ws")) {
+            pathValue = pathValue.substring(0, pathValue.length() - 3);
+        }
+        if (!pathValue.startsWith("/")) {
+            pathValue = "/" + pathValue;
+        }
+        while (pathValue.endsWith("/") && pathValue.length() > 1) {
+            pathValue = pathValue.substring(0, pathValue.length() - 1);
+        }
+        if ("/".equals(pathValue)) {
+            return "";
+        }
+        return pathValue;
+    } catch (Exception e) {
+        log("解析 server_url 路径失败: " + e.getMessage());
+        return "";
+    }
+}
+
+String buildTempFileUrl(String fileId, String accountId) {
+    if (fileId == null || fileId.trim().isEmpty()) {
+        return null;
+    }
+    String origin = resolveServerHttpOrigin();
+    if (origin == null || origin.trim().isEmpty()) {
+        return null;
+    }
+    try {
+        String pathPrefix = resolveServerPathPrefix();
+        String encodedId = URLEncoder.encode(fileId.trim(), StandardCharsets.UTF_8.name());
+        String safeAccountId = (accountId == null || accountId.trim().isEmpty()) ? "default" : accountId.trim();
+        String encodedAccountId = URLEncoder.encode(safeAccountId, StandardCharsets.UTF_8.name());
+        return origin + pathPrefix + "/wap/files/" + encodedId + "?accountId=" + encodedAccountId;
+    } catch (Exception e) {
+        log("构建临时文件 URL 失败: " + e.getMessage());
+        return null;
+    }
+}
+
 File downloadRemoteFile(String url, String desiredName) {
     InputStream in = null;
     FileOutputStream out = null;
     try {
+        File pendingDir = getPendingFilesDir();
+        if (pendingDir == null) {
+            return null;
+        }
         String safeName = sanitizeFileName(desiredName, extractFileNameFromUrl(url));
         String localName = System.currentTimeMillis() + "_" + safeName;
-        File outFile = new File(cacheDir, localName);
+        File outFile = new File(pendingDir, localName);
 
         URL remote = new URL(url);
         URLConnection conn = remote.openConnection();
         conn.setConnectTimeout(10000);
         conn.setReadTimeout(60000);
         conn.setRequestProperty("User-Agent", "openclaw-wap/1.0");
+        if (AUTH_TOKEN != null && !AUTH_TOKEN.trim().isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + AUTH_TOKEN.trim());
+        }
         conn.connect();
 
         in = conn.getInputStream();
@@ -1214,6 +1292,26 @@ File downloadRemoteFile(String url, String desiredName) {
     } finally {
         try { if (in != null) in.close(); } catch (Exception ignore) {}
         try { if (out != null) out.close(); } catch (Exception ignore) {}
+    }
+}
+
+File getPendingFilesDir() {
+    try {
+        File filesDir = new File(pluginDir, "files");
+        if (!filesDir.exists()) {
+            if (!filesDir.mkdirs()) {
+                log("创建 files 缓存目录失败: " + filesDir.getAbsolutePath());
+                return null;
+            }
+        }
+        if (!filesDir.isDirectory()) {
+            log("files 路径不是目录: " + filesDir.getAbsolutePath());
+            return null;
+        }
+        return filesDir;
+    } catch (Exception e) {
+        log("初始化 files 缓存目录失败: " + e.getMessage());
+        return null;
     }
 }
 
@@ -1345,7 +1443,12 @@ void handleServerMessage(String text) {
             }
             String talker = data.getString("talker");
             String imageUrl = data.getString("image_url");
+            String imageId = data.getString("image_id");
+            String accountId = data.getString("account_id");
             String caption = data.getString("caption");
+            if ((imageUrl == null || imageUrl.trim().isEmpty()) && imageId != null && !imageId.trim().isEmpty()) {
+                imageUrl = buildTempFileUrl(imageId, accountId);
+            }
             if (talker == null || imageUrl == null || imageUrl.trim().isEmpty()) {
                 log("send_image 指令缺少必要参数");
                 return;
@@ -1385,8 +1488,13 @@ void handleServerMessage(String text) {
             }
             String talker = data.getString("talker");
             String fileUrl = data.getString("file_url");
+            String fileId = data.getString("file_id");
+            String accountId = data.getString("account_id");
             String fileName = data.getString("file_name");
             String caption = data.getString("caption");
+            if ((fileUrl == null || fileUrl.trim().isEmpty()) && fileId != null && !fileId.trim().isEmpty()) {
+                fileUrl = buildTempFileUrl(fileId, accountId);
+            }
             if (talker == null || fileUrl == null || fileUrl.trim().isEmpty()) {
                 log("send_file 指令缺少必要参数");
                 return;
@@ -1402,18 +1510,20 @@ void handleServerMessage(String text) {
             if (!checkAndIncreaseSendRateLimit()) {
                 return;
             }
-            // WAux v1.2.6 未公开 sendFile API，文件以链接方式降级发送，确保兼容可用
             String title = sanitizeFileName(fileName, extractFileNameFromUrl(fileUrl));
-            StringBuilder textBuilder = new StringBuilder();
-            textBuilder.append("文件: ").append(title).append("\n").append(fileUrl);
-            if (caption != null && !caption.trim().isEmpty()) {
-                textBuilder.insert(0, caption.trim() + "\n");
+            File localFile = downloadRemoteFile(fileUrl, title);
+            if (localFile == null || !localFile.exists()) {
+                log("send_file 下载/落地失败: " + fileUrl);
+                return;
             }
-            String outbound = resolvedTalker.endsWith("@chatroom")
-                ? renderGroupMentionTemplates(resolvedTalker, textBuilder.toString())
-                : textBuilder.toString();
-            sendText(resolvedTalker, outbound);
-            log("send_file 已降级为文本链接发送到 " + resolvedTalker + ": " + title);
+            shareFile(resolvedTalker, title, localFile.getAbsolutePath(), "");
+            if (caption != null && !caption.trim().isEmpty()) {
+                String outboundCaption = resolvedTalker.endsWith("@chatroom")
+                    ? renderGroupMentionTemplates(resolvedTalker, caption)
+                    : caption;
+                sendText(resolvedTalker, outboundCaption);
+            }
+            log("已发送文件到 " + resolvedTalker + ": " + localFile.getName());
             return;
         }
 

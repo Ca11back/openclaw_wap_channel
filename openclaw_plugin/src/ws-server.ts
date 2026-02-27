@@ -1,5 +1,8 @@
+import { createReadStream, promises as fs } from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import type { IncomingMessage } from "http";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk";
 import {
@@ -25,6 +28,7 @@ import {
 import type { WapDownstreamCommand, WapMessageData, WapSendTextCommand, WapUpstreamMessage } from "./protocol.js";
 
 let wss: WebSocketServer | null = null;
+let httpServer: ReturnType<typeof createServer> | null = null;
 let runtime: OpenClawPluginApi | null = null;
 
 interface ClientInfo {
@@ -43,6 +47,16 @@ const AUTH_TOKEN_ENV = "WAP_AUTH_TOKEN";
 const MAX_MESSAGE_SIZE = 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX_MESSAGES = 10;
+const TEMP_FILE_TTL_MS = 10 * 60 * 1000;
+
+type TempFileEntry = {
+  accountId: string;
+  filePath: string;
+  fileName: string;
+  expiresAt: number;
+};
+
+const tempFiles = new Map<string, TempFileEntry>();
 
 const wechatContextHint = `
 [WeChat Context]
@@ -58,6 +72,66 @@ type PendingGroupHistoryEntry = {
 };
 
 const pendingGroupHistories = new Map<string, PendingGroupHistoryEntry[]>();
+
+function cleanExpiredTempFiles(now = Date.now()) {
+  for (const [id, entry] of tempFiles.entries()) {
+    if (entry.expiresAt <= now) {
+      tempFiles.delete(id);
+    }
+  }
+}
+
+function sanitizeFileName(rawName: string | undefined, fallback = "wap_media.bin"): string {
+  const source = (rawName ?? "").trim() || fallback;
+  const sanitized = source.replace(/[\\/:*?"<>|]/g, "_").trim();
+  if (!sanitized) {
+    return fallback;
+  }
+  return sanitized.length > 96 ? sanitized.slice(-96) : sanitized;
+}
+
+function extractFileNameFromUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    const decoded = decodeURIComponent(parsed.pathname.split("/").pop() ?? "");
+    return sanitizeFileName(decoded, "wap_media.bin");
+  } catch {
+    const clean = rawUrl.split("#", 1)[0]?.split("?", 1)[0] ?? rawUrl;
+    const tail = clean.slice(clean.lastIndexOf("/") + 1).trim();
+    return sanitizeFileName(tail, "wap_media.bin");
+  }
+}
+
+function resolveLocalSourcePath(source: string): string | null {
+  const trimmed = source.trim();
+  if (!trimmed || /^https?:\/\//i.test(trimmed)) {
+    return null;
+  }
+  if (trimmed.startsWith("file://")) {
+    try {
+      return decodeURIComponent(trimmed.slice("file://".length));
+    } catch {
+      return null;
+    }
+  }
+  return trimmed;
+}
+
+function looksLikeImageMedia(input: string): boolean {
+  const clean = input.split("#", 1)[0]?.split("?", 1)[0] ?? input;
+  return /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i.test(clean);
+}
+
+function resolveBearerToken(req: IncomingMessage): string {
+  const auth = req.headers.authorization?.trim() ?? "";
+  return auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+}
+
+function writeJson(res: ServerResponse, status: number, body: Record<string, unknown>) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(body));
+}
 
 function buildDmSenderCandidates(msgData: WapMessageData, dmPeerId: string): string[] {
   const raw = [
@@ -120,7 +194,7 @@ export function getWapRuntime(): OpenClawPluginApi | null {
 }
 
 export function startWsService(api: OpenClawPluginApi) {
-  if (wss) {
+  if (wss || httpServer) {
     api.logger.warn("WAP WebSocket server is already running");
     return;
   }
@@ -129,12 +203,24 @@ export function startWsService(api: OpenClawPluginApi) {
   const host = channelConfig.host?.trim() || DEFAULT_HOST;
   const port = channelConfig.port ?? DEFAULT_PORT;
 
+  httpServer = createServer((req, res) => {
+    void handleHttpRequest(req, res, api);
+  });
+
   wss = new WebSocketServer({
-    host,
-    port,
+    noServer: true,
     maxPayload: MAX_MESSAGE_SIZE,
   });
-  api.logger.info(`WAP WebSocket server started on ${host}:${port}`);
+
+  httpServer.on("upgrade", (req, socket, head) => {
+    wss?.handleUpgrade(req, socket, head, (ws) => {
+      wss?.emit("connection", ws, req);
+    });
+  });
+
+  httpServer.listen(port, host, () => {
+    api.logger.info(`WAP WebSocket/HTTP server started on ${host}:${port}`);
+  });
 
   wss.on("connection", (ws, req) => {
     const clientId = handleConnection(ws, req, api);
@@ -148,12 +234,17 @@ export function startWsService(api: OpenClawPluginApi) {
 }
 
 export function stopWsService() {
+  if (httpServer) {
+    httpServer.close();
+    httpServer = null;
+  }
   if (wss) {
     wss.close();
     wss = null;
   }
   clients.clear();
-  runtime?.logger.info("WAP WebSocket server stopped");
+  tempFiles.clear();
+  runtime?.logger.info("WAP WebSocket/HTTP server stopped");
 }
 
 function resolveAccountId(req: IncomingMessage): string {
@@ -231,6 +322,155 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
 
   api.logger.info(`WAP client connected: ${clientId} from ${ip} (account: ${resolvedAccountId})`);
   return clientId;
+}
+
+async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, api: OpenClawPluginApi) {
+  cleanExpiredTempFiles();
+  if (!req.url) {
+    writeJson(res, 404, { error: "Not found" });
+    return;
+  }
+  const requestUrl = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
+  if (req.method !== "GET" || !requestUrl.pathname.startsWith("/wap/files/")) {
+    writeJson(res, 404, { error: "Not found" });
+    return;
+  }
+
+  const fileId = requestUrl.pathname.slice("/wap/files/".length).trim();
+  if (!fileId) {
+    writeJson(res, 400, { error: "file id required" });
+    return;
+  }
+
+  const accountId = (requestUrl.searchParams.get("accountId") ?? DEFAULT_ACCOUNT_ID).trim() || DEFAULT_ACCOUNT_ID;
+  const account = resolveWapAccount(api.config, accountId);
+  const expectedToken = account.config.authToken ?? process.env[AUTH_TOKEN_ENV];
+  const receivedToken = resolveBearerToken(req);
+  if (!expectedToken || receivedToken !== expectedToken) {
+    writeJson(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const entry = tempFiles.get(fileId);
+  if (!entry || entry.accountId !== account.accountId) {
+    writeJson(res, 404, { error: "File not found" });
+    return;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    tempFiles.delete(fileId);
+    writeJson(res, 410, { error: "File expired" });
+    return;
+  }
+
+  try {
+    const stat = await fs.stat(entry.filePath);
+    if (!stat.isFile()) {
+      writeJson(res, 404, { error: "File not found" });
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(stat.size));
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(entry.fileName)}"; filename*=UTF-8''${encodeURIComponent(entry.fileName)}`,
+    );
+    const stream = createReadStream(entry.filePath);
+    stream.on("error", (error) => {
+      api.logger.warn(`WAP temp file stream failed: ${entry.filePath} (${String(error)})`);
+      if (!res.headersSent) {
+        writeJson(res, 404, { error: "File not found" });
+      } else {
+        res.destroy();
+      }
+    });
+    stream.pipe(res);
+  } catch (error) {
+    api.logger.warn(`WAP temp file read failed: ${entry.filePath} (${String(error)})`);
+    writeJson(res, 404, { error: "File not found" });
+  }
+}
+
+export async function buildWapMediaCommand(params: {
+  source: string;
+  talker: string;
+  accountId: string;
+  caption?: string;
+}): Promise<WapDownstreamCommand | null> {
+  const source = params.source.trim();
+  if (!source) {
+    return null;
+  }
+  const caption = params.caption || undefined;
+  if (/^https?:\/\//i.test(source)) {
+    if (looksLikeImageMedia(source)) {
+      return {
+        type: "send_image",
+        data: {
+          talker: params.talker,
+          image_url: source,
+          caption,
+        },
+      };
+    }
+    return {
+      type: "send_file",
+      data: {
+        talker: params.talker,
+        file_url: source,
+        file_name: extractFileNameFromUrl(source),
+        caption,
+      },
+    };
+  }
+
+  const localPath = resolveLocalSourcePath(source);
+  if (!localPath) {
+    runtime?.logger.warn(`WAP file source rejected: ${source}`);
+    return null;
+  }
+  try {
+    const stat = await fs.stat(localPath);
+    if (!stat.isFile()) {
+      runtime?.logger.warn(`WAP file source is not a regular file: ${localPath}`);
+      return null;
+    }
+  } catch (error) {
+    runtime?.logger.warn(`WAP local file stat failed for ${localPath}: ${String(error)}`);
+    return null;
+  }
+
+  const fileId = randomUUID();
+  const fileName = sanitizeFileName(path.basename(localPath), "wap_media.bin");
+  const now = Date.now();
+  tempFiles.set(fileId, {
+    accountId: params.accountId,
+    filePath: localPath,
+    fileName,
+    expiresAt: now + TEMP_FILE_TTL_MS,
+  });
+
+  if (looksLikeImageMedia(localPath)) {
+    return {
+      type: "send_image",
+      data: {
+        talker: params.talker,
+        image_id: fileId,
+        account_id: params.accountId,
+        caption,
+      },
+    };
+  }
+  return {
+    type: "send_file",
+    data: {
+      talker: params.talker,
+      file_id: fileId,
+      account_id: params.accountId,
+      file_name: fileName,
+      caption,
+    },
+  };
 }
 
 async function handleMessage(
@@ -511,28 +751,19 @@ async function processWapInboundMessage(params: {
 
         if (mediaList.length > 0) {
           for (const mediaUrl of mediaList) {
-            if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl.trim())) {
-              api.logger.warn(`WAP skip non-http media URL in reply: ${mediaUrl}`);
+            if (!mediaUrl || !mediaUrl.trim()) {
+              api.logger.warn("WAP skip empty media source in reply");
               continue;
             }
-            const isImage = /\.(jpe?g|png|gif|webp|bmp|heic|heif)(?:[?#].*)?$/i.test(mediaUrl);
-            const command: WapDownstreamCommand = isImage
-              ? {
-                  type: "send_image",
-                  data: {
-                    talker: msgData.talker,
-                    image_url: mediaUrl,
-                    caption: replyText || undefined,
-                  },
-                }
-              : {
-                  type: "send_file",
-                  data: {
-                    talker: msgData.talker,
-                    file_url: mediaUrl,
-                    caption: replyText || undefined,
-                  },
-                };
+            const command = await buildWapMediaCommand({
+              source: mediaUrl,
+              talker: msgData.talker,
+              accountId: client.accountId,
+              caption: replyText || undefined,
+            });
+            if (!command) {
+              continue;
+            }
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify(command));
             } else {

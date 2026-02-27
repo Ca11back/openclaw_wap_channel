@@ -1,6 +1,6 @@
 # OpenClaw WAP Channel
 
-通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的完整方案（当前仅支持文本消息）。
+通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的完整方案（支持文本、图片、文件发送）。
 
 ## 组件说明
 
@@ -189,7 +189,7 @@ message_ttl_ms: 30000
 }
 ```
 
-下行 `send_file` 示例（当前 WAux 客户端会降级为“标题+链接”文本发送）：
+下行 `send_file` 示例（WAux 客户端会下载文件到插件目录 `files/` 并调用 `shareFile` 发送）：
 
 ```json
 {
@@ -197,6 +197,22 @@ message_ttl_ms: 30000
   "data": {
     "talker": "wxid_or_groupid",
     "file_url": "https://example.com/demo.pdf",
+    "file_name": "demo.pdf",
+    "caption": "可选文件说明"
+  }
+}
+```
+当 gateway 仅拿到本地文件路径时，`openclaw_plugin` 会自动注册临时文件（同端口 HTTP endpoint，鉴权复用 `authToken`），并下发 `file_id`（可选 `account_id`）；WAux 客户端基于本地 `server_url` 拼接下载地址，不走 WebSocket 传文件内容。
+
+本地文件下发也支持仅传 `file_id`（以及可选 `account_id`），由 WAux 客户端根据 `server_url` 自动拼接下载地址：
+
+```json
+{
+  "type": "send_file",
+  "data": {
+    "talker": "wxid_or_groupid",
+    "file_id": "3f5f7d63-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "account_id": "default",
     "file_name": "demo.pdf",
     "caption": "可选文件说明"
   }

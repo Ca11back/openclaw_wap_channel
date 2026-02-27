@@ -61,7 +61,9 @@ export interface WapSendImageCommand {
     type: "send_image";
     data: {
         talker: string;
-        image_url: string;
+        image_url?: string;
+        image_id?: string;
+        account_id?: string;
         caption?: string;
     };
 }
@@ -70,7 +72,9 @@ export interface WapSendFileCommand {
     type: "send_file";
     data: {
         talker: string;
-        file_url: string;
+        file_url?: string;
+        file_id?: string;
+        account_id?: string;
         file_name?: string;
         caption?: string;
     };
