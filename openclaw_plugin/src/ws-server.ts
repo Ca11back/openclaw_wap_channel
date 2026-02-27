@@ -544,6 +544,14 @@ async function processWapInboundMessage(params: {
   const normalizedTalker = normalizeWapMessagingTarget(msgData.talker);
   const normalizedSender = normalizeWapMessagingTarget(msgData.sender);
   const dmPeerId = normalizeSenderId(normalizedTalker || normalizedSender || msgData.sender);
+  const groupPeerId = normalizedTalker || normalizeWapMessagingTarget(msgData.talker);
+  const routePeerId = isGroup ? groupPeerId : dmPeerId;
+  if (!routePeerId) {
+    api.logger.warn(
+      `WAP drop message with empty route peer id sender=${msgData.sender} talker=${msgData.talker} account=${client.accountId}`,
+    );
+    return;
+  }
   const senderIdForPolicy = isGroup ? msgData.sender : dmPeerId;
   const dmSenderCandidates = isGroup ? [] : buildDmSenderCandidates(msgData, dmPeerId);
   const dmPolicy = client.account.config.dmPolicy ?? "pairing";
@@ -577,7 +585,7 @@ async function processWapInboundMessage(params: {
       if (isNoMentionContextGroupEnabled(msgData.talker, noMentionContextGroups)) {
         appendPendingHistory(
           client.accountId,
-          msgData.talker,
+          routePeerId,
           {
             sender: msgData.sender,
             body: bodyText,
@@ -587,7 +595,7 @@ async function processWapInboundMessage(params: {
           noMentionContextHistoryLimit,
         );
         api.logger.debug(
-          `WAP store no-mention context for ${msgData.talker} from ${msgData.sender}`,
+          `WAP store no-mention context for ${routePeerId} from ${msgData.sender}`,
         );
       } else {
         api.logger.debug(`WAP drop group message from ${msgData.sender}: mention required`);
@@ -671,7 +679,7 @@ async function processWapInboundMessage(params: {
     accountId: client.accountId,
     peer: {
       kind,
-      id: msgData.talker,
+      id: routePeerId,
     },
   });
 
@@ -681,7 +689,7 @@ async function processWapInboundMessage(params: {
     direction: "inbound",
   });
 
-  const fromLabel = isGroup ? `${msgData.sender} in ${msgData.talker}` : dmPeerId;
+  const fromLabel = isGroup ? `${msgData.sender} in ${routePeerId}` : dmPeerId;
   const body = core.channel.reply.formatInboundEnvelope({
     channel: "WeChat",
     from: fromLabel,
@@ -692,16 +700,16 @@ async function processWapInboundMessage(params: {
   });
   let combinedBody = body;
   if (isGroup) {
-    const pendingEntries = consumePendingHistory(client.accountId, msgData.talker);
+    const pendingEntries = consumePendingHistory(client.accountId, routePeerId);
     if (pendingEntries.length > 0) {
       const historyLines: string[] = [];
       for (const entry of pendingEntries) {
         historyLines.push(
           core.channel.reply.formatInboundEnvelope({
             channel: "WeChat",
-            from: `${entry.sender} in ${msgData.talker}`,
+            from: `${entry.sender} in ${routePeerId}`,
             timestamp: entry.timestamp,
-            body: `${entry.body} [id:${entry.messageId ?? "unknown"} group:${msgData.talker}]`,
+            body: `${entry.body} [id:${entry.messageId ?? "unknown"} group:${routePeerId}]`,
             chatType: "group",
             sender: { name: entry.sender, id: entry.sender },
           }),
@@ -715,13 +723,13 @@ async function processWapInboundMessage(params: {
     Body: combinedBody,
     RawBody: bodyText,
     CommandBody: bodyText,
-    From: isGroup ? `${CHANNEL_ID}:group:${msgData.talker}` : `${CHANNEL_ID}:${dmPeerId}`,
-    To: msgData.talker,
+    From: isGroup ? `${CHANNEL_ID}:group:${routePeerId}` : `${CHANNEL_ID}:${dmPeerId}`,
+    To: routePeerId,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: chatType,
     ConversationLabel: fromLabel,
-    GroupSubject: isGroup ? msgData.talker : undefined,
+    GroupSubject: isGroup ? routePeerId : undefined,
     SenderName: msgData.sender,
     SenderId: senderIdForPolicy,
     Provider: CHANNEL_ID,
@@ -731,7 +739,7 @@ async function processWapInboundMessage(params: {
     WasMentioned: isGroup ? msgData.is_at_me === true : undefined,
     CommandAuthorized: commandAuth.commandAuthorized,
     OriginatingChannel: CHANNEL_ID,
-    OriginatingTo: msgData.talker,
+    OriginatingTo: routePeerId,
   });
 
   const textLimit = core.channel.text.resolveTextChunkLimit(cfg, CHANNEL_ID, client.accountId, {
