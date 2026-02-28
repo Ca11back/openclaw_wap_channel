@@ -17,6 +17,7 @@ import java.io.FileReader;
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.FileOutputStream;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLEncoder;
@@ -1222,11 +1223,23 @@ String sanitizeFileName(String rawName, String fallback) {
 
 String resolveServerHttpOrigin() {
     try {
-        URL wsUrl = new URL(SERVER_URL);
-        String protocol = wsUrl.getProtocol();
-        String httpProtocol = "wss".equalsIgnoreCase(protocol) ? "https" : "http";
-        String host = wsUrl.getHost();
-        int port = wsUrl.getPort();
+        URI wsUri = URI.create(SERVER_URL);
+        String protocol = wsUri.getScheme();
+        if (protocol == null || protocol.trim().isEmpty()) {
+            return null;
+        }
+        String normalizedProtocol = protocol.trim().toLowerCase();
+        String httpProtocol;
+        if ("wss".equals(normalizedProtocol) || "https".equals(normalizedProtocol)) {
+            httpProtocol = "https";
+        } else if ("ws".equals(normalizedProtocol) || "http".equals(normalizedProtocol)) {
+            httpProtocol = "http";
+        } else {
+            log("解析 server_url 失败: unsupported protocol: " + protocol);
+            return null;
+        }
+        String host = wsUri.getHost();
+        int port = wsUri.getPort();
         if (host == null || host.trim().isEmpty()) {
             return null;
         }
@@ -1244,8 +1257,8 @@ String resolveServerHttpOrigin() {
 
 String resolveServerPathPrefix() {
     try {
-        URL wsUrl = new URL(SERVER_URL);
-        String rawPath = wsUrl.getPath();
+        URI wsUri = URI.create(SERVER_URL);
+        String rawPath = wsUri.getPath();
         if (rawPath == null || rawPath.trim().isEmpty() || "/".equals(rawPath.trim())) {
             return "";
         }
