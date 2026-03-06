@@ -136,6 +136,10 @@ message_ttl_ms: 30000
     "msg_type": 1,
     "talker": "wxid_or_groupid",
     "sender": "wxid_xxx",
+    "sender_display_name": "张三",
+    "sender_group_display_name": "前端-张三",
+    "group_name": "OpenClaw 开发群",
+    "group_member_count": 128,
     "content": "消息内容",
     "timestamp": 1706600000000,
     "is_private": true,
@@ -145,6 +149,8 @@ message_ttl_ms: 30000
   }
 }
 ```
+
+说明：`sender_display_name`、`sender_group_display_name`、`group_name`、`group_member_count` 为插件端本地自动查询后附带的可选元数据，旧版客户端可不发送。
 
 下行 `config` 示例：
 

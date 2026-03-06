@@ -7,6 +7,10 @@ export interface WapMessageData {
     msg_type: number;
     talker: string; // 会话 ID (wxid 或群 ID)
     sender: string; // 发送者 wxid
+    sender_display_name?: string;
+    sender_group_display_name?: string;
+    group_name?: string;
+    group_member_count?: number;
     content: string; // 消息内容
     timestamp: number; // 毫秒时间戳
     is_private: boolean;

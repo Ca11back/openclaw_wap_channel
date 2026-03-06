@@ -90,6 +90,15 @@ openclaw-channel-wap/
 
 ## 📝 协议版本
 
-当前版本：**v3.0.0**
+当前版本：**v3.0.1**
 
 协议兼容性：插件版本和 Channel 版本需保持一致。
+
+补充说明：上行 `message` 在基础字段之外，支持附带以下可选元数据字段，均由 WAuxiliary 插件端本地查询后自动补充：
+
+- `sender_display_name`：发送者展示名（优先好友备注 / 昵称）
+- `sender_group_display_name`：发送者在当前群内的显示名 / 群名片
+- `group_name`：群名称
+- `group_member_count`：群成员数量
+
+以上字段均为向后兼容的可选扩展；旧版插件可以不发送，服务端会自动回退到 `sender` / `talker`。

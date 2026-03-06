@@ -573,6 +573,11 @@ void onHandleMsg(Object msgInfoBean) {
         if (content == null || content.trim().isEmpty()) {
             return;
         }
+        String senderGroupDisplayName = msgInfoBean.isGroupChat() ? getGroupMemberDisplayName(talker, sender) : "";
+        String senderDisplayName = resolveInboundSenderDisplayName(msgInfoBean, sender, talker);
+        String groupName = msgInfoBean.isGroupChat() ? getGroupNameByTalker(talker) : "";
+        int groupMemberCount = msgInfoBean.isGroupChat() ? getResolvedGroupMemberCount(talker) : 0;
+
         JSONObject msg = new JSONObject();
         msg.put("type", "message");
 
@@ -581,6 +586,18 @@ void onHandleMsg(Object msgInfoBean) {
         data.put("msg_type", msgInfoBean.getType());
         data.put("talker", talker);
         data.put("sender", sender);
+        if (senderDisplayName != null && !senderDisplayName.trim().isEmpty() && !senderDisplayName.trim().equals(sender)) {
+            data.put("sender_display_name", senderDisplayName.trim());
+        }
+        if (senderGroupDisplayName != null && !senderGroupDisplayName.trim().isEmpty() && !senderGroupDisplayName.trim().equals(sender)) {
+            data.put("sender_group_display_name", senderGroupDisplayName.trim());
+        }
+        if (groupName != null && !groupName.trim().isEmpty() && !groupName.trim().equals(talker)) {
+            data.put("group_name", groupName.trim());
+        }
+        if (groupMemberCount > 0) {
+            data.put("group_member_count", groupMemberCount);
+        }
         data.put("content", content);
         data.put("timestamp", msgInfoBean.getCreateTime());
         data.put("is_private", msgInfoBean.isPrivateChat());
@@ -598,7 +615,8 @@ void onHandleMsg(Object msgInfoBean) {
         if (contentPreview.length() > 30) {
             contentPreview = contentPreview.substring(0, 30) + "...";
         }
-        String description = sender + " -> " + contentPreview;
+        String senderLabel = senderDisplayName != null && !senderDisplayName.trim().isEmpty() ? senderDisplayName.trim() : sender;
+        String description = senderLabel + " -> " + contentPreview;
 
         String payload = msg.toString();
         if (!sendMessageDirectly(payload, description)) {
@@ -937,6 +955,193 @@ String nullSafeInvokeString(Object target, String methodName) {
     }
 }
 
+String getFriendDisplayName(String wxid) {
+    if (wxid == null || wxid.trim().isEmpty()) {
+        return "";
+    }
+
+    String friendName = "";
+    try {
+        friendName = getFriendName(wxid);
+    } catch (Exception ignore) {}
+    if (friendName != null && !friendName.trim().isEmpty()) {
+        return friendName.trim();
+    }
+
+    List friends = null;
+    try {
+        friends = getFriendList();
+    } catch (Exception e) {
+        log("获取好友显示名失败: " + e.getMessage());
+        return "";
+    }
+    if (friends == null || friends.isEmpty()) {
+        return "";
+    }
+
+    String target = normalizeNameKey(wxid);
+    for (int i = 0; i < friends.size(); i++) {
+        Object item = friends.get(i);
+        if (item == null) {
+            continue;
+        }
+        String friendWxid = normalizeNameKey(nullSafeInvokeString(item, "getWxid"));
+        if (friendWxid.isEmpty() || !friendWxid.equals(target)) {
+            continue;
+        }
+        String remark = nullSafeInvokeString(item, "getRemark");
+        if (!remark.isEmpty()) return remark;
+        String nickname = nullSafeInvokeString(item, "getNickname");
+        if (!nickname.isEmpty()) return nickname;
+        String alias = nullSafeInvokeString(item, "getAlias");
+        if (!alias.isEmpty()) return alias;
+        break;
+    }
+    return "";
+}
+
+String getGroupNameByTalker(String groupTalker) {
+    if (groupTalker == null || groupTalker.trim().isEmpty()) {
+        return "";
+    }
+
+    List groups = null;
+    try {
+        groups = getGroupList();
+    } catch (Exception e) {
+        log("获取群名称失败: " + e.getMessage());
+        return "";
+    }
+    if (groups == null || groups.isEmpty()) {
+        return "";
+    }
+
+    String target = normalizeNameKey(groupTalker);
+    for (int i = 0; i < groups.size(); i++) {
+        Object item = groups.get(i);
+        if (item == null) {
+            continue;
+        }
+        String roomId = normalizeNameKey(nullSafeInvokeString(item, "getRoomId"));
+        if (roomId.isEmpty() || !roomId.equals(target)) {
+            continue;
+        }
+        String groupName = nullSafeInvokeString(item, "getName");
+        if (!groupName.isEmpty()) {
+            return groupName;
+        }
+        break;
+    }
+    return "";
+}
+
+String extractGroupMemberWxid(Object item) {
+    String wxid = nullSafeInvokeString(item, "getWxid");
+    if (!wxid.isEmpty()) {
+        return wxid;
+    }
+    return String.valueOf(item).trim();
+}
+
+String getGroupMemberDisplayName(String groupTalker, String memberWxid) {
+    if (groupTalker == null || groupTalker.trim().isEmpty() || memberWxid == null || memberWxid.trim().isEmpty()) {
+        return "";
+    }
+
+    List members = null;
+    try {
+        members = getGroupMemberList(groupTalker);
+    } catch (Exception e) {
+        log("获取群成员显示名失败: " + e.getMessage());
+        return "";
+    }
+    if (members != null && !members.isEmpty()) {
+        String target = normalizeNameKey(memberWxid);
+        for (int i = 0; i < members.size(); i++) {
+            Object item = members.get(i);
+            if (item == null) {
+                continue;
+            }
+            String wxid = normalizeNameKey(extractGroupMemberWxid(item));
+            if (wxid.isEmpty() || !wxid.equals(target)) {
+                continue;
+            }
+            String displayName = nullSafeInvokeString(item, "getDisplayName");
+            if (!displayName.isEmpty()) return displayName;
+            String groupNick = nullSafeInvokeString(item, "getGroupNick");
+            if (!groupNick.isEmpty()) return groupNick;
+            String nickname = nullSafeInvokeString(item, "getNickname");
+            if (!nickname.isEmpty()) return nickname;
+            String name = nullSafeInvokeString(item, "getName");
+            if (!name.isEmpty()) return name;
+            break;
+        }
+    }
+
+    String scopedName = "";
+    try {
+        scopedName = getFriendName(memberWxid, groupTalker);
+    } catch (Exception ignore) {}
+    if (scopedName != null && !scopedName.trim().isEmpty()) {
+        return scopedName.trim();
+    }
+
+    return getFriendDisplayName(memberWxid);
+}
+
+int getResolvedGroupMemberCount(String groupTalker) {
+    if (groupTalker == null || groupTalker.trim().isEmpty()) {
+        return 0;
+    }
+
+    try {
+        Object countValue = getGroupMemberCount(groupTalker);
+        if (countValue instanceof Number) {
+            int count = ((Number) countValue).intValue();
+            if (count > 0) {
+                return count;
+            }
+        } else if (countValue != null) {
+            String countText = String.valueOf(countValue).trim();
+            if (!countText.isEmpty()) {
+                int count = Integer.parseInt(countText);
+                if (count > 0) {
+                    return count;
+                }
+            }
+        }
+    } catch (Exception ignore) {}
+
+    try {
+        List members = getGroupMemberList(groupTalker);
+        if (members != null) {
+            return members.size();
+        }
+    } catch (Exception ignore) {}
+    return 0;
+}
+
+String resolveInboundSenderDisplayName(Object msgInfoBean, String sender, String talker) {
+    String displayName = nullSafeInvokeString(msgInfoBean, "getDisplayName");
+    if (!displayName.isEmpty()) {
+        return displayName;
+    }
+
+    if (msgInfoBean != null && msgInfoBean.isGroupChat()) {
+        String groupDisplayName = getGroupMemberDisplayName(talker, sender);
+        if (!groupDisplayName.isEmpty()) {
+            return groupDisplayName;
+        }
+    }
+
+    String friendDisplayName = getFriendDisplayName(sender);
+    if (!friendDisplayName.isEmpty()) {
+        return friendDisplayName;
+    }
+
+    return sender == null ? "" : sender.trim();
+}
+
 boolean isFriendWxid(String wxid) {
     if (wxid == null || wxid.trim().isEmpty()) {
         return false;
@@ -1035,11 +1240,11 @@ String resolveGroupMemberWxid(String groupTalker, String memberKeyRaw) {
     for (int i = 0; i < members.size(); i++) {
         Object item = members.get(i);
         if (item == null) continue;
-        String wxid = String.valueOf(item).trim();
+        String wxid = extractGroupMemberWxid(item);
         if (wxid.isEmpty()) continue;
         String wxidKey = normalizeNameKey(wxid);
-        String groupName = normalizeNameKey(getFriendName(wxid, groupTalker));
-        String globalName = normalizeNameKey(getFriendName(wxid));
+        String groupName = normalizeNameKey(getGroupMemberDisplayName(groupTalker, wxid));
+        String globalName = normalizeNameKey(getFriendDisplayName(wxid));
 
         if (wxidKey.equals(key) || (!groupName.isEmpty() && groupName.equals(key)) || (!globalName.isEmpty() && globalName.equals(key))) {
             exactMatches.add(wxid);
