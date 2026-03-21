@@ -2,14 +2,29 @@
 
 通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的完整方案（支持文本、图片、文件发送）。
 
+## v4 重点变化
+
+- 当前版本按 **v4.0.0** 处理，允许不兼容旧版 `wap_plugin`
+- 除了被动接收入站消息，`openclaw_plugin` 现在还会注册主动 WeChat 工具：
+  - `wechat_get_friends`
+  - `wechat_get_groups`
+  - `wechat_search_target`
+  - `wechat_send_text`
+  - `wechat_capabilities`
+- WA 客户端会在连接后主动上报能力，并支持宿主侧通过 `rpc_request` / `rpc_result` 查询好友、群聊、目标解析等能力
+- 新增基础诊断命令：
+  - `/wap doctor`
+  - `/wap capabilities`
+  - `openclaw wap-diagnose`
+
 ## 组件说明
 
 本仓库包含两个必须配套使用的组件：
 
 | 组件 | 类型 | 安装方式 | 说明 |
 |------|------|----------|------|
-| `openclaw_plugin/` | OpenClaw Channel（服务端） | `openclaw plugins install` | 接收消息、执行策略、调用 OpenClaw AI |
-| `wap_plugin/` | WAuxiliary 插件（客户端） | 手动安装 | 接收服务端策略并在本地过滤/发送微信消息 |
+| `openclaw_plugin/` | OpenClaw Channel（服务端） | `openclaw plugins install` | 接收消息、执行策略、调用 OpenClaw AI，并注册主动 WeChat 工具 |
+| `wap_plugin/` | WAuxiliary 插件（客户端） | 手动安装 | 接收服务端策略并在本地过滤/发送微信消息，同时提供好友/群聊/目标解析 RPC 能力 |
 
 ## 快速开始
 
@@ -94,6 +109,23 @@ message_ttl_ms: 30000
 | `silentPairing` | pairing 模式下是否静默拦截（不自动回配对码） |
 | `accounts.<id>.*` | 账户级配置（覆盖全局字段） |
 
+## 主动工具与诊断命令
+
+当前插件除了普通 channel 出入站流程，还会注册以下 OpenClaw 工具：
+
+- `wechat_get_friends`：读取当前账号好友列表
+- `wechat_get_groups`：读取当前账号群聊列表
+- `wechat_search_target`：将关键字目标解析为 canonical `user:wxid` / `group:*@chatroom`
+- `wechat_send_text`：主动发送文本消息
+- `wechat_capabilities`：查看已连接 WA 客户端的能力声明
+
+当前插件还会注册以下命令：
+
+- `/wap doctor`
+- `/wap capabilities`
+- `/wap help`
+- `openclaw wap-diagnose`
+
 ## 客户端行为与过滤原则
 
 - 客户端连接后接收服务端下发配置：`allow_from/group_policy/group_allow_chats/group_allow_from/no_mention_context_groups/dm_policy/require_mention_in_group/silent_pairing`。
@@ -152,6 +184,22 @@ message_ttl_ms: 30000
 
 说明：`sender_display_name`、`sender_group_display_name`、`group_name`、`group_member_count` 为插件端本地自动查询后附带的可选元数据，旧版客户端可不发送。
 
+上行 `capabilities` 示例（客户端连接并收到配置后主动上报）：
+
+```json
+{
+  "type": "capabilities",
+  "data": {
+    "protocol_version": "wap-vnext-2026-03-21",
+    "client_name": "openclaw-channel-wap",
+    "client_version": "4.0.0",
+    "rpc_methods": ["get_friends", "get_groups", "search_target"],
+    "command_types": ["resolve_target", "send_text", "send_image", "send_file"],
+    "features": ["capabilities", "rpc", "group_mentions", "local_media_cache"]
+  }
+}
+```
+
 下行 `config` 示例：
 
 ```json
@@ -198,6 +246,44 @@ message_ttl_ms: 30000
 ```
 
 说明：`send_text` / `send_image` / `send_file` 的 `talker` 仅应传入 canonical 标识（好友 `wxid` 或群 `*@chatroom`）。昵称/备注/关键字目标需先通过 `resolve_target` 解析。
+
+下行 `rpc_request` 示例（主动查询好友列表）：
+
+```json
+{
+  "type": "rpc_request",
+  "data": {
+    "request_id": "9e40b4fe-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "method": "get_friends",
+    "params": {}
+  }
+}
+```
+
+上行 `rpc_result` 示例（好友列表返回）：
+
+```json
+{
+  "type": "rpc_result",
+  "data": {
+    "request_id": "9e40b4fe-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "method": "get_friends",
+    "ok": true,
+    "result": {
+      "friends": [
+        {
+          "wxid": "wxid_xxx",
+          "remark": "Admin",
+          "nickname": "CopyDog",
+          "display_name": "Admin",
+          "sendable": true
+        }
+      ],
+      "count": 1
+    }
+  }
+}
+```
 
 下行 `send_text` 示例：
 

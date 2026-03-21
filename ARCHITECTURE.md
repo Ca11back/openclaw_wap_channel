@@ -6,15 +6,16 @@
 ┌─────────────────┐          WebSocket           ┌──────────────────┐
 │  微信 (WeChat)  │ ◄────────────────────────► │  OpenClaw 服务器  │
 │                 │                              │                  │
-│  ┌───────────┐  │   1. 消息转发 (message)      │  ┌────────────┐  │
+│  ┌───────────┐  │   1. 入站消息 (message)      │  ┌────────────┐  │
 │  │ WAuxiliary│  │   ──────────────────────►   │  │  Channel   │  │
 │  │  Plugin   │  │                              │  │  (本插件)  │  │
-│  └───────────┘  │   2. AI回复 (send_text/send_image/send_file) │  └────────────┘  │
-│                 │   ◄──────────────────────   │         │        │
-└─────────────────┘                              │         ▼        │
-                                                 │  ┌────────────┐  │
-                                                 │  │  核心 AI   │  │
-                                                 │  └────────────┘  │
+│  └───────────┘  │   2. 回复命令 (send_*)       │  └────────────┘  │
+│                 │   ◄──────────────────────    │         │        │
+│                 │   3. 能力上报 (capabilities) │         ▼        │
+│                 │   ──────────────────────►    │  ┌────────────┐  │
+│                 │   4. 主动查询 (rpc_*)        │  │  核心 AI   │  │
+│                 │   ◄──────────────────────►   │  │ + WeChat工具│  │
+└─────────────────┘                              │  └────────────┘  │
                                                  └──────────────────┘
 ```
 
@@ -33,6 +34,29 @@
 3. WAuxiliary 返回 `resolve_target_result`（最终 wxid / 群 talker）
 4. Channel 使用解析后的目标发送 `send_text` / `send_image` / `send_file`
 5. WAuxiliary 插件接收指令并调用微信 API 发送消息
+
+### 主动工具调用
+1. OpenClaw Agent/skill 调用 `wechat_*` 工具
+2. Host 侧插件通过 `rpc_request` 查询好友、群聊或目标解析
+3. WAuxiliary 返回 `rpc_result`
+4. Host 侧根据返回结果选择继续发送 `send_text` 或返回结构化结果给工具调用方
+
+## 🤝 能力握手
+
+客户端连接并收到 `config` 后，会主动发送 `capabilities`：
+
+- `protocol_version`
+- `client_name`
+- `client_version`
+- `rpc_methods`
+- `command_types`
+- `features`
+
+Host 侧会缓存这些能力，用于：
+
+- 工具/命令诊断输出
+- 后续能力判定
+- 为未来的能力协商和渐进扩展打基础
 
 ## 🔒 安全机制
 
@@ -68,7 +92,10 @@ openclaw-channel-wap/
     ├── index.ts                 # 入口文件
     ├── src/                     # 源代码
     │   ├── channel.ts           # Channel 实现
-    │   ├── ws-server.ts         # WebSocket 服务器
+    │   ├── commands.ts          # /wap 与 CLI 诊断命令
+    │   ├── operations.ts        # 主动工具与目录复用的高层操作
+    │   ├── tools.ts             # wechat_* 工具注册
+    │   ├── ws-server.ts         # WebSocket 服务器与 RPC/能力缓存
     │   └── protocol.ts          # 通信协议定义
     └── test/                    # 测试工具
         ├── standalone-server.ts # 独立服务器测试
@@ -90,9 +117,9 @@ openclaw-channel-wap/
 
 ## 📝 协议版本
 
-当前版本：**v3.0.1**
+当前版本：**v4.0.0**
 
-协议兼容性：插件版本和 Channel 版本需保持一致。
+协议兼容性：当前按 v4 处理，不要求兼容旧版 `wap_plugin`。
 
 补充说明：上行 `message` 在基础字段之外，支持附带以下可选元数据字段，均由 WAuxiliary 插件端本地查询后自动补充：
 
@@ -102,3 +129,15 @@ openclaw-channel-wap/
 - `group_member_count`：群成员数量
 
 以上字段均为向后兼容的可选扩展；旧版插件可以不发送，服务端会自动回退到 `sender` / `talker`。
+
+新增协议族：
+
+- `capabilities`
+- `rpc_request`
+- `rpc_result`
+
+当前主动 RPC 方法：
+
+- `get_friends`
+- `get_groups`
+- `search_target`
