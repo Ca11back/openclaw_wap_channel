@@ -5,6 +5,7 @@
 ## v4 重点变化
 
 - 当前版本按 **v4.0.0** 处理，允许不兼容旧版 `wap_plugin`
+- `openclaw_plugin` 现在按 OpenClaw 官方推荐方式使用 SDK 子路径，不再依赖单体式 `openclaw/plugin-sdk` root barrel；宿主侧建议使用 `openclaw >= 2026.3.11`
 - 除了被动接收入站消息，`openclaw_plugin` 现在还会注册主动 WeChat 工具：
   - `wechat_get_friends`
   - `wechat_get_groups`

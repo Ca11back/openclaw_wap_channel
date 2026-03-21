@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { buildWapClientDiagnostics, listWapFriends, listWapGroups, searchWapTarget, sendWapMedia, sendWapText } from "./operations.js";
 
 type ToolResult = {

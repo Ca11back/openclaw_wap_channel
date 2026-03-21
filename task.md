@@ -315,6 +315,11 @@ Success criteria:
 - Mirrored client-relevant per-group fields down to `wap_plugin/main.java` so Android pre-filtering matches host routing
 - Fixed config inheritance so channel-level `groups` also apply to the default account
 - Explicitly decided not to fake per-group `skills` support because there is no reliable WAP/SDK hook to enforce it today
+- Migrated WAP imports away from the monolithic `openclaw/plugin-sdk` barrel to official subpaths:
+  - `openclaw/plugin-sdk/core`
+  - `openclaw/plugin-sdk/command-auth`
+- Replaced the old root-barrel local type shim with subpath-scoped declarations and re-verified `pnpm exec tsc --noEmit`
+- Raised WAP peer compatibility floor to `openclaw >= 2026.3.11`, which is the era where official subpath-based plugin SDK usage is expected
 
 ## Remaining Follow-up
 

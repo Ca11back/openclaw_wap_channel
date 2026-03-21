@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 
 export const CHANNEL_ID = "openclaw-channel-wap" as const;
 export const DEFAULT_ACCOUNT_ID = "default" as const;

@@ -3,8 +3,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk/command-auth";
 import {
   buildWapClientGroupConfigs,
   CHANNEL_ID,

@@ -1,4 +1,4 @@
-import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
+import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/core";
 import {
   CHANNEL_ID,
   DEFAULT_ACCOUNT_ID,
