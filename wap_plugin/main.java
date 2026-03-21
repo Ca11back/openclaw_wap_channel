@@ -1600,11 +1600,161 @@ void sendResolveTargetResult(String requestId, String target, String resolvedTal
     }
 }
 
+boolean isDirectTargetSendable(String wxid) {
+    if (wxid == null || wxid.trim().isEmpty()) {
+        return false;
+    }
+    if (!isFriendWxid(wxid)) {
+        return false;
+    }
+    return ALLOW_FROM.size() == 0 || ALLOW_FROM.contains(normalizeId(wxid));
+}
+
+JSONObject buildFriendSummary(Object item) {
+    if (item == null) {
+        return null;
+    }
+    String wxid = nullSafeInvokeString(item, "getWxid");
+    if (wxid == null || wxid.trim().isEmpty()) {
+        return null;
+    }
+    String remark = nullSafeInvokeString(item, "getRemark");
+    String nickname = nullSafeInvokeString(item, "getNickname");
+    String alias = nullSafeInvokeString(item, "getAlias");
+    JSONObject friend = new JSONObject();
+    friend.put("wxid", wxid);
+    if (remark != null && !remark.trim().isEmpty()) {
+        friend.put("remark", remark.trim());
+    }
+    if (nickname != null && !nickname.trim().isEmpty()) {
+        friend.put("nickname", nickname.trim());
+    }
+    if (alias != null && !alias.trim().isEmpty()) {
+        friend.put("alias", alias.trim());
+    }
+    String displayName = wxid;
+    if (remark != null && !remark.trim().isEmpty()) {
+        displayName = remark.trim();
+    } else if (nickname != null && !nickname.trim().isEmpty()) {
+        displayName = nickname.trim();
+    } else if (alias != null && !alias.trim().isEmpty()) {
+        displayName = alias.trim();
+    }
+    friend.put("display_name", displayName);
+    friend.put("sendable", isDirectTargetSendable(wxid));
+    return friend;
+}
+
+JSONObject buildGroupSummary(Object item) {
+    if (item == null) {
+        return null;
+    }
+    String talker = nullSafeInvokeString(item, "getRoomId");
+    if (talker == null || talker.trim().isEmpty()) {
+        return null;
+    }
+    JSONObject group = new JSONObject();
+    group.put("talker", talker.trim());
+    String name = nullSafeInvokeString(item, "getName");
+    if (name != null && !name.trim().isEmpty()) {
+        group.put("name", name.trim());
+    }
+    int memberCount = getResolvedGroupMemberCount(talker);
+    if (memberCount > 0) {
+        group.put("member_count", memberCount);
+    }
+    return group;
+}
+
+JSONObject buildSearchTargetResult(String rawTarget) {
+    String resolvedTalker = resolveOutboundTalker(rawTarget);
+    if (resolvedTalker == null || resolvedTalker.trim().isEmpty()) {
+        return null;
+    }
+    boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
+    JSONObject result = new JSONObject();
+    result.put("talker", resolvedTalker);
+    result.put("target_kind", isGroupTalker ? "group" : "direct");
+    result.put("sendable", isGroupTalker ? true : isDirectTargetSendable(resolvedTalker));
+    String displayName = isGroupTalker ? getGroupNameByTalker(resolvedTalker) : getFriendDisplayName(resolvedTalker);
+    if (displayName != null && !displayName.trim().isEmpty()) {
+        result.put("display_name", displayName.trim());
+    }
+    return result;
+}
+
+void sendCapabilities() {
+    try {
+        if (webSocket == null || !isConnected) {
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        payload.put("type", "capabilities");
+        JSONObject data = new JSONObject();
+        data.put("protocol_version", "wap-vnext-2026-03-21");
+        data.put("client_name", "openclaw-channel-wap");
+        data.put("client_version", "4.0.0");
+
+        JSONArray rpcMethods = new JSONArray();
+        rpcMethods.add("get_friends");
+        rpcMethods.add("get_groups");
+        rpcMethods.add("search_target");
+        data.put("rpc_methods", rpcMethods);
+
+        JSONArray commandTypes = new JSONArray();
+        commandTypes.add("resolve_target");
+        commandTypes.add("send_text");
+        commandTypes.add("send_image");
+        commandTypes.add("send_file");
+        data.put("command_types", commandTypes);
+
+        JSONArray features = new JSONArray();
+        features.add("capabilities");
+        features.add("rpc");
+        features.add("group_mentions");
+        features.add("local_media_cache");
+        data.put("features", features);
+
+        payload.put("data", data);
+        webSocket.send(payload.toString());
+        log("已上报能力: rpc_methods=" + rpcMethods + ", command_types=" + commandTypes);
+    } catch (Exception e) {
+        log("上报能力失败: " + e.getMessage());
+    }
+}
+
+void sendRpcResult(String requestId, String method, Object result, String errorMessage) {
+    try {
+        if (webSocket == null || !isConnected) {
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        payload.put("type", "rpc_result");
+
+        JSONObject data = new JSONObject();
+        data.put("request_id", requestId == null ? "" : requestId);
+        data.put("method", method == null ? "" : method);
+        boolean ok = errorMessage == null || errorMessage.trim().isEmpty();
+        data.put("ok", ok);
+        if (ok) {
+            data.put("result", result == null ? new JSONObject() : result);
+            log("rpc_result 回传: request_id=" + requestId + ", method=" + method + ", ok=true");
+        } else {
+            data.put("error", errorMessage);
+            log("rpc_result 回传: request_id=" + requestId + ", method=" + method + ", ok=false, error=" + errorMessage);
+        }
+        payload.put("data", data);
+        webSocket.send(payload.toString());
+    } catch (Exception e) {
+        log("rpc_result 回传失败: " + e.getMessage());
+    }
+}
+
 void handleServerMessage(String text) {
     try {
         JSONObject msg = JSON.parseObject(text);
         String type = msg.getString("type");
-        if ("resolve_target".equals(type) || "send_text".equals(type) || "send_image".equals(type) || "send_file".equals(type)) {
+        if ("resolve_target".equals(type) || "rpc_request".equals(type) || "send_text".equals(type) || "send_image".equals(type) || "send_file".equals(type)) {
             log("收到服务端指令 type=" + type);
         }
 
@@ -1682,6 +1832,91 @@ void handleServerMessage(String text) {
 
                 log("收到服务端配置，group_policy=" + groupPolicy + ", group_allow_chats: " + GROUP_ALLOW_CHATS + ", no_mention_context_groups: " + NO_MENTION_CONTEXT_GROUPS + ", allow_from: " + ALLOW_FROM + ", group_allow_from: " + GROUP_ALLOW_FROM + ", require_mention_in_group=" + requireMentionInGroup);
             }
+            sendCapabilities();
+            return;
+        }
+
+        if ("rpc_request".equals(type)) {
+            JSONObject data = msg.getJSONObject("data");
+            if (data == null) {
+                log("rpc_request 指令缺少 data");
+                return;
+            }
+            String requestId = data.getString("request_id");
+            String method = data.getString("method");
+            JSONObject params = data.getJSONObject("params");
+            if (requestId == null || requestId.trim().isEmpty() || method == null || method.trim().isEmpty()) {
+                log("rpc_request 指令缺少 request_id 或 method");
+                return;
+            }
+            if (params == null) {
+                params = new JSONObject();
+            }
+
+            if ("get_friends".equals(method)) {
+                JSONArray friendsJson = new JSONArray();
+                List friends = null;
+                try {
+                    friends = getFriendList();
+                } catch (Exception e) {
+                    sendRpcResult(requestId, method, null, "getFriendList failed: " + e.getMessage());
+                    return;
+                }
+                if (friends != null) {
+                    for (int i = 0; i < friends.size(); i++) {
+                        JSONObject friend = buildFriendSummary(friends.get(i));
+                        if (friend != null) {
+                            friendsJson.add(friend);
+                        }
+                    }
+                }
+                JSONObject result = new JSONObject();
+                result.put("friends", friendsJson);
+                result.put("count", friendsJson.size());
+                sendRpcResult(requestId, method, result, null);
+                return;
+            }
+
+            if ("get_groups".equals(method)) {
+                JSONArray groupsJson = new JSONArray();
+                List groups = null;
+                try {
+                    groups = getGroupList();
+                } catch (Exception e) {
+                    sendRpcResult(requestId, method, null, "getGroupList failed: " + e.getMessage());
+                    return;
+                }
+                if (groups != null) {
+                    for (int i = 0; i < groups.size(); i++) {
+                        JSONObject group = buildGroupSummary(groups.get(i));
+                        if (group != null) {
+                            groupsJson.add(group);
+                        }
+                    }
+                }
+                JSONObject result = new JSONObject();
+                result.put("groups", groupsJson);
+                result.put("count", groupsJson.size());
+                sendRpcResult(requestId, method, result, null);
+                return;
+            }
+
+            if ("search_target".equals(method)) {
+                String target = params.getString("target");
+                if (target == null || target.trim().isEmpty()) {
+                    sendRpcResult(requestId, method, null, "target is required");
+                    return;
+                }
+                JSONObject result = buildSearchTargetResult(target);
+                if (result == null) {
+                    sendRpcResult(requestId, method, null, "target resolve failed");
+                    return;
+                }
+                sendRpcResult(requestId, method, result, null);
+                return;
+            }
+
+            sendRpcResult(requestId, method, null, "unsupported method: " + method);
             return;
         }
 

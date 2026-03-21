@@ -22,6 +22,7 @@ import {
   resolveTargetViaClient,
   sendToClient,
 } from "./ws-server.js";
+import { buildWapClientDiagnostics, listWapFriends, listWapGroups, searchWapTarget } from "./operations.js";
 
 function getAccountClientCount(accountId: string): number {
   return getClientStats().filter((client) => client.accountId === accountId).length;
@@ -114,7 +115,14 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     media: true,
     threads: false,
     reactions: false,
-    nativeCommands: false,
+    nativeCommands: true,
+  },
+  agentPrompt: {
+    messageToolHints: () => [
+      "- Use `wechat_search_target` to resolve ambiguous WeChat recipients before sending.",
+      "- Use `wechat_get_friends` and `wechat_get_groups` when you need proactive WeChat discovery.",
+      "- Use `wechat_send_text` for active WeChat outreach outside the current reply flow.",
+    ],
   },
   reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
   configSchema: wapChannelConfigSchema,
@@ -155,6 +163,16 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
         normalizeEntry: normalizeWapMessagingTarget,
       };
     },
+    collectWarnings: ({ accountId }) => {
+      const diagnostics = buildWapClientDiagnostics(accountId);
+      const warnings: string[] = [];
+      if (diagnostics.connectedClients === 0) {
+        warnings.push(`No connected WAP clients for account ${diagnostics.accountId}`);
+      } else if (!diagnostics.capabilities) {
+        warnings.push(`Connected WAP client for account ${diagnostics.accountId} has not advertised capabilities yet`);
+      }
+      return warnings;
+    },
   },
   groups: {
     resolveRequireMention: ({ cfg, accountId }) => {
@@ -167,6 +185,39 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     targetResolver: {
       looksLikeId: looksLikeWapTargetId,
       hint: "<user:direct_id|group:group_id@chatroom>",
+    },
+  },
+  directory: {
+    self: async () => null,
+    listPeers: async (params: {
+      accountId?: string | null;
+      query?: string | null;
+      limit?: number | null;
+    }) => {
+      const result = await listWapFriends(params);
+      if (!result.ok) {
+        return [];
+      }
+      return result.friends.map((entry) => ({
+        kind: "user" as const,
+        id: entry.wxid,
+        name: entry.displayName,
+      }));
+    },
+    listGroups: async (params: {
+      accountId?: string | null;
+      query?: string | null;
+      limit?: number | null;
+    }) => {
+      const result = await listWapGroups(params);
+      if (!result.ok) {
+        return [];
+      }
+      return result.groups.map((entry) => ({
+        kind: "group" as const,
+        id: entry.talker,
+        name: entry.name,
+      }));
     },
   },
   actions: {
@@ -220,7 +271,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       runtime?.logger.debug(
         `WAP search start account=${effectiveAccountId} query=${query}`,
       );
-      const resolved = await resolveTargetViaClient({
+      const resolved = await searchWapTarget({
         target: query,
         accountId: effectiveAccountId,
       });
@@ -230,8 +281,8 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
         );
         throw new Error(resolved.error);
       }
-      const kind = resolved.kind === "group" || resolved.talker.endsWith("@chatroom") ? "group" : "direct";
-      const canonicalTarget = decorateCanonicalTarget(resolved.talker);
+      const kind = resolved.result.targetKind;
+      const canonicalTarget = resolved.result.canonicalTarget;
       runtime?.logger.debug(
         `WAP search ok account=${effectiveAccountId} query=${query} canonical=${canonicalTarget} kind=${kind}`,
       );
@@ -245,6 +296,9 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
                 input: queryRaw,
                 canonicalTarget,
                 targetKind: kind,
+                talker: resolved.result.talker,
+                displayName: resolved.result.displayName,
+                sendable: resolved.result.sendable,
                 usage: "Use canonicalTarget as message target",
               },
               null,

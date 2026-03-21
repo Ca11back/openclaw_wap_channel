@@ -26,8 +26,12 @@ import {
   type WapAccount,
 } from "./config.js";
 import type {
+  WapCapabilitiesPayload,
+  WapClientCapabilities,
   WapDownstreamCommand,
   WapMessageData,
+  WapRpcRequestCommand,
+  WapRpcResultPayload,
   WapResolveTargetResultPayload,
   WapSendTextCommand,
   WapUpstreamMessage,
@@ -45,6 +49,8 @@ interface ClientInfo {
   connectedAt: Date;
   messageCount: number;
   lastMessageAt: number;
+  capabilities: WapClientCapabilities | null;
+  lastCapabilityAt: number | null;
 }
 
 const clients = new Map<string, ClientInfo>();
@@ -55,6 +61,7 @@ const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX_MESSAGES = 10;
 const TEMP_FILE_TTL_MS = 10 * 60 * 1000;
 const TARGET_RESOLVE_TIMEOUT_MS = 5000;
+const RPC_TIMEOUT_MS = 5000;
 
 type TempFileEntry = {
   accountId: string;
@@ -148,6 +155,7 @@ type PendingGroupHistoryEntry = {
 };
 
 const pendingGroupHistories = new Map<string, PendingGroupHistoryEntry[]>();
+
 type PendingTargetResolve = {
   clientId: string;
   accountId: string;
@@ -157,6 +165,36 @@ type PendingTargetResolve = {
 };
 
 const pendingTargetResolves = new Map<string, PendingTargetResolve>();
+
+type PendingRpcRequest = {
+  clientId: string;
+  accountId: string;
+  method: string;
+  resolve: (result: { ok: true; result: unknown } | { ok: false; error: string }) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+const pendingRpcRequests = new Map<string, PendingRpcRequest>();
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function normalizeCapabilities(data: WapClientCapabilities): WapClientCapabilities {
+  return {
+    protocol_version: data.protocol_version.trim(),
+    client_name: pickFirstNonEmpty(data.client_name),
+    client_version: pickFirstNonEmpty(data.client_version),
+    rpc_methods: normalizeStringList(data.rpc_methods),
+    command_types: normalizeStringList(data.command_types),
+    features: normalizeStringList(data.features),
+  };
+}
 
 function cleanExpiredTempFiles(now = Date.now()) {
   for (const [id, entry] of tempFiles.entries()) {
@@ -360,6 +398,11 @@ export function stopWsService() {
     pending.resolve({ ok: false, error: "WAP connection closed before target resolve completed" });
     pendingTargetResolves.delete(requestId);
   }
+  for (const [requestId, pending] of pendingRpcRequests.entries()) {
+    clearTimeout(pending.timeout);
+    pending.resolve({ ok: false, error: "WAP connection closed before RPC completed" });
+    pendingRpcRequests.delete(requestId);
+  }
   clients.clear();
   tempFiles.clear();
   runtime?.logger.info("WAP WebSocket/HTTP server stopped");
@@ -412,6 +455,8 @@ function handleConnection(ws: WebSocket, req: IncomingMessage, api: OpenClawPlug
     connectedAt: new Date(),
     messageCount: 0,
     lastMessageAt: 0,
+    capabilities: null,
+    lastCapabilityAt: null,
   });
 
   const allowFrom = resolveAllowFrom(account.config);
@@ -464,6 +509,74 @@ function settlePendingTargetResolve(
   pendingTargetResolves.delete(requestId);
   pending.resolve(result);
   return true;
+}
+
+function settlePendingRpcRequest(
+  requestId: string,
+  result: { ok: true; result: unknown } | { ok: false; error: string },
+): boolean {
+  const pending = pendingRpcRequests.get(requestId);
+  if (!pending) {
+    return false;
+  }
+  clearTimeout(pending.timeout);
+  pendingRpcRequests.delete(requestId);
+  pending.resolve(result);
+  return true;
+}
+
+function handleCapabilities(clientId: string, msg: WapCapabilitiesPayload, api: OpenClawPluginApi) {
+  const client = clients.get(clientId);
+  if (!client) {
+    return;
+  }
+  const protocolVersion = typeof msg.data?.protocol_version === "string" ? msg.data.protocol_version.trim() : "";
+  if (!protocolVersion) {
+    api.logger.warn(`WAP capabilities missing protocol_version from ${clientId}`);
+    return;
+  }
+  client.capabilities = normalizeCapabilities(msg.data);
+  client.lastCapabilityAt = Date.now();
+  api.logger.info(`WAP capabilities updated for ${clientId}`, {
+    protocolVersion: client.capabilities.protocol_version,
+    rpcMethods: client.capabilities.rpc_methods,
+    commandTypes: client.capabilities.command_types,
+    features: client.capabilities.features,
+  });
+}
+
+function handleRpcResult(clientId: string, msg: WapRpcResultPayload, api: OpenClawPluginApi) {
+  const requestId = typeof msg.data?.request_id === "string" ? msg.data.request_id.trim() : "";
+  const method = typeof msg.data?.method === "string" ? msg.data.method.trim() : "";
+  if (!requestId || !method) {
+    api.logger.warn(`WAP rpc_result missing request_id/method from ${clientId}`);
+    return;
+  }
+  const pending = pendingRpcRequests.get(requestId);
+  if (!pending) {
+    api.logger.debug(`WAP rpc_result for unknown request ${requestId} from ${clientId}`);
+    return;
+  }
+  if (pending.clientId !== clientId) {
+    api.logger.warn(
+      `WAP rpc_result request ${requestId} received from unexpected client ${clientId}; expected ${pending.clientId}`,
+    );
+    return;
+  }
+  if (pending.method !== method) {
+    api.logger.warn(
+      `WAP rpc_result request ${requestId} method mismatch from ${clientId}; expected ${pending.method}, got ${method}`,
+    );
+    return;
+  }
+  if (msg.data.ok) {
+    settlePendingRpcRequest(requestId, { ok: true, result: msg.data.result });
+    return;
+  }
+  const error = typeof msg.data.error === "string" && msg.data.error.trim()
+    ? msg.data.error.trim()
+    : `WAP RPC failed: ${method}`;
+  settlePendingRpcRequest(requestId, { ok: false, error });
 }
 
 function handleResolveTargetResult(clientId: string, msg: WapResolveTargetResultPayload, api: OpenClawPluginApi) {
@@ -686,6 +799,14 @@ async function handleMessage(
 
     if (msg.type === "heartbeat") {
       client.ws.send(JSON.stringify({ type: "pong" }));
+      return;
+    }
+    if (msg.type === "capabilities") {
+      handleCapabilities(clientId, msg, api);
+      return;
+    }
+    if (msg.type === "rpc_result") {
+      handleRpcResult(clientId, msg, api);
       return;
     }
     if (msg.type === "resolve_target_result") {
@@ -1034,6 +1155,53 @@ function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
     return { type: "heartbeat" };
   }
 
+  if (obj.type === "capabilities") {
+    const capabilityData = obj.data;
+    if (typeof capabilityData !== "object" || capabilityData === null) {
+      return null;
+    }
+    const d = capabilityData as Record<string, unknown>;
+    if (typeof d.protocol_version !== "string") {
+      return null;
+    }
+    return {
+      type: "capabilities",
+      data: {
+        protocol_version: d.protocol_version,
+        client_name: typeof d.client_name === "string" ? d.client_name : undefined,
+        client_version: typeof d.client_version === "string" ? d.client_version : undefined,
+        rpc_methods: normalizeStringList(d.rpc_methods),
+        command_types: normalizeStringList(d.command_types),
+        features: normalizeStringList(d.features),
+      },
+    };
+  }
+
+  if (obj.type === "rpc_result") {
+    const resultData = obj.data;
+    if (typeof resultData !== "object" || resultData === null) {
+      return null;
+    }
+    const d = resultData as Record<string, unknown>;
+    if (
+      typeof d.request_id !== "string" ||
+      typeof d.method !== "string" ||
+      typeof d.ok !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      type: "rpc_result",
+      data: {
+        request_id: d.request_id,
+        method: d.method,
+        ok: d.ok,
+        result: d.result,
+        error: typeof d.error === "string" ? d.error : undefined,
+      },
+    };
+  }
+
   if (obj.type === "resolve_target_result") {
     const resultData = obj.data;
     if (typeof resultData !== "object" || resultData === null) {
@@ -1125,6 +1293,14 @@ function handleDisconnect(clientId: string, api: OpenClawPluginApi) {
     pending.resolve({ ok: false, error: "WAP client disconnected before target resolve completed" });
     pendingTargetResolves.delete(requestId);
   }
+  for (const [requestId, pending] of pendingRpcRequests.entries()) {
+    if (pending.clientId !== clientId) {
+      continue;
+    }
+    clearTimeout(pending.timeout);
+    pending.resolve({ ok: false, error: "WAP client disconnected before RPC completed" });
+    pendingRpcRequests.delete(requestId);
+  }
   const client = clients.get(clientId);
   clients.delete(clientId);
   api.logger.info(
@@ -1194,6 +1370,57 @@ export async function resolveTargetViaClient(params: {
   });
 }
 
+export async function callClientRpc(params: {
+  method: string;
+  rpcParams?: Record<string, unknown>;
+  accountId?: string | null;
+  timeoutMs?: number;
+}): Promise<{ ok: true; result: unknown } | { ok: false; error: string }> {
+  const method = params.method.trim();
+  if (!method) {
+    return { ok: false, error: "Missing WAP RPC method" };
+  }
+  const accountId = (params.accountId ?? DEFAULT_ACCOUNT_ID).trim() || DEFAULT_ACCOUNT_ID;
+  const resolved = resolveOpenClient(accountId);
+  if (!resolved) {
+    return { ok: false, error: `No connected WAP clients for account ${accountId}` };
+  }
+  const [clientId, client] = resolved;
+  const requestId = randomUUID();
+  const timeoutMs = params.timeoutMs ?? RPC_TIMEOUT_MS;
+  const rpcCommand: WapRpcRequestCommand = {
+    type: "rpc_request",
+    data: {
+      request_id: requestId,
+      method,
+      params: params.rpcParams ?? {},
+    },
+  };
+  return await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      settlePendingRpcRequest(requestId, {
+        ok: false,
+        error: `WAP RPC timeout (${timeoutMs}ms): ${method}`,
+      });
+    }, timeoutMs);
+    pendingRpcRequests.set(requestId, {
+      clientId,
+      accountId,
+      method,
+      timeout,
+      resolve,
+    });
+    try {
+      client.ws.send(JSON.stringify(rpcCommand));
+    } catch (error) {
+      settlePendingRpcRequest(requestId, {
+        ok: false,
+        error: `WAP RPC dispatch failed: ${String(error)}`,
+      });
+    }
+  });
+}
+
 export function getClientCount(): number {
   return clients.size;
 }
@@ -1203,11 +1430,24 @@ export function getClientStats(): Array<{
   accountId: string;
   ip: string;
   connectedAt: Date;
+  capabilities: WapClientCapabilities | null;
+  lastCapabilityAt: number | null;
 }> {
   return Array.from(clients.entries()).map(([clientId, info]) => ({
     clientId,
     accountId: info.accountId,
     ip: info.ip,
     connectedAt: info.connectedAt,
+    capabilities: info.capabilities,
+    lastCapabilityAt: info.lastCapabilityAt,
   }));
+}
+
+export function getClientCapabilities(accountId?: string | null): WapClientCapabilities | null {
+  const targetAccountId = (accountId ?? DEFAULT_ACCOUNT_ID).trim() || DEFAULT_ACCOUNT_ID;
+  const resolved = resolveOpenClient(targetAccountId);
+  if (!resolved) {
+    return null;
+  }
+  return resolved[1].capabilities;
 }
