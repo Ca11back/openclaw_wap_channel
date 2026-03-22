@@ -282,7 +282,7 @@ Success criteria:
 - [x] Consider active `wechat_send_file`
 - [x] Add per-group `enabled` / `requireMention` / `groupPolicy` / `allowFrom` model
 - [x] Add per-group `tools` / `systemPrompt` host hooks
-- [ ] Add per-group `skills` parity if/when WAP gains a real dispatch hook for skill filtering
+- [x] Add per-group `skills` parity
 - [x] Record remaining follow-up work here
 
 ## Progress Log
@@ -314,7 +314,8 @@ Success criteria:
   - `groups.<talker>.systemPrompt`
 - Mirrored client-relevant per-group fields down to `wap_plugin/main.java` so Android pre-filtering matches host routing
 - Fixed config inheritance so channel-level `groups` also apply to the default account
-- Explicitly decided not to fake per-group `skills` support because there is no reliable WAP/SDK hook to enforce it today
+- Added per-group `skills` parity by mapping `groups.<talker>.skills` into OpenClaw `replyOptions.skillFilter`
+- Confirmed WAP does not need Android/plugin-protocol changes for group skill filtering because the enforcement happens in the host reply pipeline
 - Migrated WAP imports away from the monolithic `openclaw/plugin-sdk` barrel to official subpaths:
   - `openclaw/plugin-sdk/core`
   - `openclaw/plugin-sdk/command-auth`
@@ -326,9 +327,6 @@ Success criteria:
 ## Remaining Follow-up
 
 - The local development snapshot under `openclaw_plugin/node_modules/openclaw` is still `2026.1.29` and only ships `dist/plugin-sdk/index.js`; real runtime verification of the new subpath imports requires OpenClaw `>= 2026.3.11`
-- Per-group `skills` parity still needs either:
-  - a WAP-specific inbound dispatch layer like `openclaw-lark`, or
-  - a new plugin-sdk/runtime hook for group skill filtering
 - Java-side behavior has been updated by code inspection and protocol symmetry, but no Android runtime validation was run in this session
 - If/when runtime validation is needed, push only `wap_plugin/` to:
   `/sdcard/Android/media/com.tencent.mm/WAuxiliary/Plugin/openclaw-channel-wap`

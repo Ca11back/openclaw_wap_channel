@@ -81,6 +81,7 @@ openclaw plugins install openclaw-channel-wap
               "groupPolicy": "allowlist",
               "allowFrom": ["wxid_owner_a", "wxid_operator_a"],
               "requireMention": false,
+              "skills": ["product-search", "release-checklist"],
               "systemPrompt": "这是产品群，优先给出结论和下一步。",
               "tools": {
                 "allow": ["wechat_send_text", "wechat_send_image"]
@@ -134,6 +135,7 @@ message_ttl_ms: 30000
 | `groups."<talker>".allowFrom` | 单群发送者 allowlist |
 | `groups."<talker>".requireMention` | 单群是否必须 @ |
 | `groups."<talker>".tools` | 单群工具 allow/deny（宿主侧） |
+| `groups."<talker>".skills` | 单群技能 allowlist（宿主侧） |
 | `groups."<talker>".systemPrompt` | 单群上下文提示（宿主侧） |
 | `accounts.<id>.*` | 账户级配置（覆盖全局字段） |
 
@@ -164,8 +166,8 @@ message_ttl_ms: 30000
 - 群聊按本地顺序过滤：`group_policy` -> `group_allow_chats` -> `groups.<talker>.enabled` -> `groups.<talker>.groupPolicy/allowFrom` -> `@` 门禁。
 - 默认维持“群内必须 @ 才触发回复”；只有命中 `no_mention_context_groups` 的群，未@消息才会上报用于上下文记录（不触发当次回复）。
 - `groups."*"` 作为默认群级覆盖项，`groups."<talker>"` 作为精确覆盖项。
-- `tools` / `systemPrompt` 在宿主侧生效；`enabled` / `groupPolicy` / `allowFrom` / `requireMention` 会同步到 Android 端本地预过滤。
-- 当前没有真正可执行的 per-group `skills` hook，因此 README 中不提供 `groups.<talker>.skills` 配置。
+- `tools` / `skills` / `systemPrompt` 在宿主侧生效；`enabled` / `groupPolicy` / `allowFrom` / `requireMention` 会同步到 Android 端本地预过滤。
+- `groups.<talker>.skills` 会作为当前群聊的 `skillFilter` 传给 OpenClaw reply pipeline；如果 agent 本身也配置了 `skills`，最终效果是两者取交集。
 - pairing 模式支持静默拦截。
 
 ## 发送目标与解析规则

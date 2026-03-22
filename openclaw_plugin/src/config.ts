@@ -19,6 +19,7 @@ export interface WapGroupConfig {
   requireMention?: boolean;
   allowFrom?: string[];
   tools?: WapGroupToolPolicy;
+  skills?: string[];
   systemPrompt?: string;
 }
 
@@ -93,6 +94,7 @@ function mergeGroupConfig(base: WapGroupConfig | undefined, next: WapGroupConfig
     ...base,
     ...next,
     allowFrom: next?.allowFrom ?? base?.allowFrom,
+    skills: next?.skills ?? base?.skills,
     tools: mergeToolPolicy(base?.tools, next?.tools),
   };
 }
@@ -258,6 +260,25 @@ export function resolveWapGroupToolPolicy(params: {
   const groupConfig = resolveWapGroupConfig(params);
   const defaultConfig = resolveWapDefaultGroupConfig(params.config);
   return groupConfig?.tools ?? defaultConfig?.tools;
+}
+
+export function resolveWapGroupSkillFilter(params: {
+  config: WapAccountConfig;
+  groupId?: string | null;
+}): string[] | undefined {
+  const groupConfig = resolveWapGroupConfig(params);
+  const defaultConfig = resolveWapDefaultGroupConfig(params.config);
+  const skillFilter = groupConfig?.skills ?? defaultConfig?.skills;
+  if (!Array.isArray(skillFilter)) {
+    return undefined;
+  }
+  return Array.from(
+    new Set(
+      skillFilter
+        .map((entry) => String(entry).trim())
+        .filter((entry) => entry.length > 0),
+    ),
+  );
 }
 
 export function resolveWapGroupSystemPrompt(params: {
@@ -510,6 +531,7 @@ export const wapChannelConfigSchema = {
                 deny: { type: "array", items: { type: "string" } },
               },
             },
+            skills: { type: "array", items: { type: "string" } },
             systemPrompt: { type: "string" },
           },
         },
@@ -559,6 +581,7 @@ export const wapChannelConfigSchema = {
                       deny: { type: "array", items: { type: "string" } },
                     },
                   },
+                  skills: { type: "array", items: { type: "string" } },
                   systemPrompt: { type: "string" },
                 },
               },
@@ -599,7 +622,7 @@ export const wapChannelConfigSchema = {
       help: "Pending context entries kept per group for no-mention messages.",
     },
     "channels.openclaw-channel-wap.groups": {
-      help: "Per-group overrides keyed by group talker or '*'. Supports enabled, requireMention, allowFrom, tools, and systemPrompt.",
+      help: "Per-group overrides keyed by group talker or '*'. Supports enabled, requireMention, allowFrom, tools, skills, and systemPrompt.",
     },
     "channels.openclaw-channel-wap.silentPairing": {
       help: "When true, pairing requests are recorded silently without auto-reply.",

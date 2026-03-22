@@ -26,6 +26,7 @@ import {
   resolveWapGroupEnabled,
   resolveWapGroupRequireMention,
   resolveWapGroupSenderPolicyContext,
+  resolveWapGroupSkillFilter,
   resolveWapGroupSystemPrompt,
   resolveWapAccount,
   type WapAccount,
@@ -1079,6 +1080,12 @@ async function processWapInboundMessage(params: {
         groupId: routePeerId,
       })
     : undefined;
+  const groupSkillFilter = isGroup
+    ? resolveWapGroupSkillFilter({
+        config: client.account.config,
+        groupId: routePeerId,
+      })
+    : undefined;
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: combinedBody,
@@ -1179,7 +1186,10 @@ async function processWapInboundMessage(params: {
       ctx: ctxPayload,
       cfg,
       dispatcher,
-      replyOptions,
+      replyOptions: {
+        ...replyOptions,
+        ...(groupSkillFilter !== undefined ? { skillFilter: groupSkillFilter } : {}),
+      },
     });
     if (isGroup && pendingEntries.length > 0) {
       clearPendingHistory(client.accountId, routePeerId);

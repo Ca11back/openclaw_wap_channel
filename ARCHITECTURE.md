@@ -82,13 +82,14 @@ WAP v4 当前支持一组最小但真实生效的 Feishu 风格群级覆盖：
 - `groupPolicy` / `allowFrom`：控制群内哪些发送者可以触发
 - `requireMention`：覆盖默认 @ 门禁
 - `tools`：宿主侧工具 allow/deny
+- `skills`：宿主侧技能 allowlist
 - `systemPrompt`：宿主侧额外群上下文提示
 
 实现边界：
 
 - `enabled` / `groupPolicy` / `allowFrom` / `requireMention` 会同步到 Android 端本地预过滤
-- `tools` / `systemPrompt` 只在宿主侧生效
-- `skills` 尚未实现，因为当前 WAP 链路没有等价的 per-group skill dispatch hook
+- `tools` / `skills` / `systemPrompt` 只在宿主侧生效
+- `skills` 通过 `replyOptions.skillFilter` 注入 OpenClaw reply pipeline；如果 agent 本身配置了 `skills`，最终取交集
 
 ## 📦 目录结构
 
