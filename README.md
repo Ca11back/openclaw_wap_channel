@@ -214,12 +214,19 @@ message_ttl_ms: 30000
     "is_private": true,
     "is_group": false,
     "is_at_me": false,
-    "at_user_list": []
+    "at_user_list": [],
+    "is_quote": true,
+    "quote_title": "你看下这个",
+    "quote_content": "上一条被引用的原消息",
+    "quote_sender": "wxid_peer",
+    "quote_display_name": "李四",
+    "quote_talker": "wxid_peer",
+    "quote_type": 1
   }
 }
 ```
 
-说明：`sender_display_name`、`sender_group_display_name`、`group_name`、`group_member_count` 为插件端本地自动查询后附带的可选元数据，旧版客户端可不发送。
+说明：`sender_display_name`、`sender_group_display_name`、`group_name`、`group_member_count`、`is_quote`、`quote_*` 为插件端本地补充的消息元数据。当前实现要求 host 与 `wap_plugin` 同步升级。
 
 上行 `capabilities` 示例（客户端连接并收到配置后主动上报）：
 
@@ -227,12 +234,12 @@ message_ttl_ms: 30000
 {
   "type": "capabilities",
   "data": {
-    "protocol_version": "wap-vnext-2026-03-21",
+    "protocol_version": "wap-vnext-2026-03-23",
     "client_name": "openclaw-channel-wap",
     "client_version": "4.0.0",
     "rpc_methods": ["get_friends", "get_groups", "search_target"],
     "command_types": ["resolve_target", "send_text", "send_image", "send_file"],
-    "features": ["capabilities", "rpc", "group_mentions", "local_media_cache"]
+    "features": ["capabilities", "rpc", "group_mentions", "local_media_cache", "quote_reply", "quote_inbound"]
   }
 }
 ```
@@ -329,10 +336,13 @@ message_ttl_ms: 30000
   "type": "send_text",
   "data": {
     "talker": "wxid_or_groupid",
-    "content": "AI 回复内容"
+    "content": "AI 回复内容",
+    "reply_to_msg_id": 12345678
   }
 }
 ```
+
+说明：`reply_to_msg_id` 存在时，`wap_plugin` 会优先调用 `sendQuoteMsg(...)`，以引用该条消息的方式发送文本回复。
 
 下行 `send_image` 示例：
 

@@ -30,6 +30,13 @@ export interface WapMessageData {
   is_group: boolean;
   is_at_me?: boolean;
   at_user_list?: string[];
+  is_quote?: boolean;
+  quote_title?: string;
+  quote_content?: string;
+  quote_sender?: string;
+  quote_display_name?: string;
+  quote_talker?: string;
+  quote_type?: number;
 }
 
 export interface WapMessagePayload {
@@ -85,6 +92,7 @@ export interface WapSendTextCommand {
   data: {
     talker: string;
     content: string;
+    reply_to_msg_id?: number;
   };
 }
 

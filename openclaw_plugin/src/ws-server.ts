@@ -94,6 +94,18 @@ function buildWapAgentBody(bodyText: string): string {
   return `${trimmedBody}\n\n${wechatContextHint.trim()}`;
 }
 
+function buildWapReplyToBody(msgData: WapMessageData): string | undefined {
+  if (msgData.is_quote !== true) {
+    return undefined;
+  }
+  const quoteText = pickFirstNonEmpty(msgData.quote_content, msgData.quote_title);
+  if (!quoteText) {
+    return undefined;
+  }
+  const quoteSender = pickFirstNonEmpty(msgData.quote_display_name, msgData.quote_sender);
+  return quoteSender ? `${quoteSender}: ${quoteText}` : quoteText;
+}
+
 function pickFirstNonEmpty(...values: Array<string | undefined>): string | undefined {
   for (const value of values) {
     const trimmed = typeof value === "string" ? value.trim() : "";
@@ -120,7 +132,7 @@ function resolveWapGroupSubject(msgData: WapMessageData, fallbackTalker: string)
 
 function buildWapUntrustedContext(msgData: WapMessageData): string[] {
   const metadata = {
-    schema: "openclaw.wap.message_meta.v1",
+    schema: "openclaw.wap.message_meta.v2",
     msg_id: msgData.msg_id,
     msg_type: msgData.msg_type,
     talker: msgData.talker,
@@ -138,6 +150,16 @@ function buildWapUntrustedContext(msgData: WapMessageData): string[] {
     at_user_list:
       Array.isArray(msgData.at_user_list) && msgData.at_user_list.length > 0
         ? msgData.at_user_list
+        : undefined,
+    is_quote: msgData.is_quote === true ? true : undefined,
+    quote_title: pickFirstNonEmpty(msgData.quote_title),
+    quote_content: pickFirstNonEmpty(msgData.quote_content),
+    quote_sender: pickFirstNonEmpty(msgData.quote_sender),
+    quote_display_name: pickFirstNonEmpty(msgData.quote_display_name),
+    quote_talker: pickFirstNonEmpty(msgData.quote_talker),
+    quote_type:
+      typeof msgData.quote_type === "number" && Number.isFinite(msgData.quote_type)
+        ? msgData.quote_type
         : undefined,
   };
 
@@ -1035,6 +1057,7 @@ async function processWapInboundMessage(params: {
     direction: "inbound",
   });
 
+  const replyToBody = buildWapReplyToBody(msgData);
   const messageBody = buildWapAgentBody(bodyText);
   const pendingEntries = isGroup ? getPendingHistory(client.accountId, routePeerId) : [];
   const inboundHistory =
@@ -1093,6 +1116,7 @@ async function processWapInboundMessage(params: {
     InboundHistory: inboundHistory,
     RawBody: bodyText,
     CommandBody: bodyText,
+    ReplyToBody: replyToBody,
     From: isGroup ? `${CHANNEL_ID}:group:${routePeerId}` : `${CHANNEL_ID}:${dmPeerId}`,
     To: routePeerId,
     SessionKey: route.sessionKey,
@@ -1166,6 +1190,7 @@ async function processWapInboundMessage(params: {
               data: {
                 talker: msgData.talker,
                 content: chunk,
+                reply_to_msg_id: msgData.msg_id,
               },
             };
             if (ws.readyState === WebSocket.OPEN) {
@@ -1314,9 +1339,17 @@ function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
     typeof d.sender_group_display_name === "string" ? d.sender_group_display_name : undefined;
   const groupName = typeof d.group_name === "string" ? d.group_name : undefined;
   const groupMemberCount =
-    typeof d.group_member_count === "number" && Number.isFinite(d.group_member_count)
+      typeof d.group_member_count === "number" && Number.isFinite(d.group_member_count)
       ? d.group_member_count
       : undefined;
+  const isQuote = typeof d.is_quote === "boolean" ? d.is_quote : undefined;
+  const quoteTitle = typeof d.quote_title === "string" ? d.quote_title : undefined;
+  const quoteContent = typeof d.quote_content === "string" ? d.quote_content : undefined;
+  const quoteSender = typeof d.quote_sender === "string" ? d.quote_sender : undefined;
+  const quoteDisplayName = typeof d.quote_display_name === "string" ? d.quote_display_name : undefined;
+  const quoteTalker = typeof d.quote_talker === "string" ? d.quote_talker : undefined;
+  const quoteType =
+    typeof d.quote_type === "number" && Number.isFinite(d.quote_type) ? d.quote_type : undefined;
   return {
     type: "message",
     data: {
@@ -1334,6 +1367,13 @@ function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
       is_group: d.is_group,
       is_at_me: isAtMe,
       at_user_list: atUserList,
+      is_quote: isQuote,
+      quote_title: quoteTitle,
+      quote_content: quoteContent,
+      quote_sender: quoteSender,
+      quote_display_name: quoteDisplayName,
+      quote_talker: quoteTalker,
+      quote_type: quoteType,
     },
   };
 }

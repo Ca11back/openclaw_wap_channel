@@ -617,6 +617,7 @@ void onHandleMsg(Object msgInfoBean) {
         if (atUsers != null) {
             data.put("at_user_list", atUsers);
         }
+        appendInboundQuoteMetadata(data, msgInfoBean);
 
         msg.put("data", data);
 
@@ -688,9 +689,83 @@ void dumpMsgInfoBean(Object msgInfoBean) {
 String buildInboundContent(Object msgInfoBean, boolean isTextMessage) {
     if (isTextMessage) {
         String text = msgInfoBean.getContent();
+        if (text != null && !text.trim().isEmpty()) {
+            return text;
+        }
+        try {
+            if (msgInfoBean.isQuote()) {
+                Object quoteMsg = msgInfoBean.getQuoteMsg();
+                if (quoteMsg != null) {
+                    String quoteTitle = quoteMsg.getTitle();
+                    return quoteTitle == null ? "" : quoteTitle;
+                }
+            }
+        } catch (Exception e) {
+            log("解析引用消息正文失败: " + e.getMessage());
+        }
         return text == null ? "" : text;
     }
     return "";
+}
+
+void appendInboundQuoteMetadata(JSONObject data, Object msgInfoBean) {
+    try {
+        if (!msgInfoBean.isQuote()) {
+            return;
+        }
+        Object quoteMsg = msgInfoBean.getQuoteMsg();
+        if (quoteMsg == null) {
+            return;
+        }
+        data.put("is_quote", true);
+
+        String quoteTitle = quoteMsg.getTitle();
+        if (quoteTitle != null && !quoteTitle.trim().isEmpty()) {
+            data.put("quote_title", quoteTitle.trim());
+        }
+
+        String quoteContent = quoteMsg.getContent();
+        if (quoteContent != null && !quoteContent.trim().isEmpty()) {
+            data.put("quote_content", quoteContent.trim());
+        }
+
+        String quoteSender = quoteMsg.getSendTalker();
+        if (quoteSender != null && !quoteSender.trim().isEmpty()) {
+            data.put("quote_sender", quoteSender.trim());
+        }
+
+        String quoteDisplayName = quoteMsg.getDisplayName();
+        if (quoteDisplayName != null && !quoteDisplayName.trim().isEmpty()) {
+            data.put("quote_display_name", quoteDisplayName.trim());
+        }
+
+        String quoteTalker = quoteMsg.getTalker();
+        if (quoteTalker != null && !quoteTalker.trim().isEmpty()) {
+            data.put("quote_talker", quoteTalker.trim());
+        }
+
+        data.put("quote_type", quoteMsg.getType());
+    } catch (Exception e) {
+        log("提取引用消息元数据失败: " + e.getMessage());
+    }
+}
+
+long parseOptionalLong(Object value) {
+    if (value == null) {
+        return 0L;
+    }
+    if (value instanceof Number) {
+        return ((Number) value).longValue();
+    }
+    try {
+        String raw = String.valueOf(value).trim();
+        if (raw.isEmpty()) {
+            return 0L;
+        }
+        return Long.parseLong(raw);
+    } catch (Exception e) {
+        return 0L;
+    }
 }
 
 boolean resolveIsMentionedMe(Object msgInfoBean) {
@@ -1815,7 +1890,7 @@ void sendCapabilities() {
         JSONObject payload = new JSONObject();
         payload.put("type", "capabilities");
         JSONObject data = new JSONObject();
-        data.put("protocol_version", "wap-vnext-2026-03-21");
+        data.put("protocol_version", "wap-vnext-2026-03-23");
         data.put("client_name", "openclaw-channel-wap");
         data.put("client_version", "4.0.0");
 
@@ -1837,6 +1912,8 @@ void sendCapabilities() {
         features.add("rpc");
         features.add("group_mentions");
         features.add("local_media_cache");
+        features.add("quote_reply");
+        features.add("quote_inbound");
         data.put("features", features);
 
         payload.put("data", data);
@@ -2136,6 +2213,7 @@ void handleServerMessage(String text) {
             }
             String talker = data.getString("talker");
             String content = data.getString("content");
+            long replyToMsgId = parseOptionalLong(data.get("reply_to_msg_id"));
 
             if (talker == null || content == null) {
                 log("send_text 指令缺少必要参数");
@@ -2154,12 +2232,23 @@ void handleServerMessage(String text) {
             String outboundContent = isGroupTalker
                 ? renderGroupMentionTemplates(canonicalTalker, content)
                 : content;
-            sendText(canonicalTalker, outboundContent);
+            boolean sentAsQuote = false;
+            if (replyToMsgId > 0L) {
+                try {
+                    sendQuoteMsg(canonicalTalker, replyToMsgId, outboundContent);
+                    sentAsQuote = true;
+                } catch (Exception e) {
+                    log("引用回复发送失败，回退普通文本: " + e.getMessage());
+                    sendText(canonicalTalker, outboundContent);
+                }
+            } else {
+                sendText(canonicalTalker, outboundContent);
+            }
             String preview = outboundContent;
             if (preview.length() > 30) {
                 preview = preview.substring(0, 30) + "...";
             }
-            log("已发送消息到 " + canonicalTalker + ": " + preview);
+            log("已发送消息到 " + canonicalTalker + (sentAsQuote ? " [quote]" : "") + ": " + preview);
             return;
         }
 

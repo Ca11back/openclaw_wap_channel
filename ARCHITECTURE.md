@@ -138,7 +138,9 @@ openclaw-channel-wap/
 
 当前版本：**v4.0.0**
 
-协议兼容性：当前按 v4 处理，不要求兼容旧版 `wap_plugin`。
+协议快照：`wap-vnext-2026-03-23`
+
+兼容性：当前实现直接按最新协议处理，要求 host 与 `wap_plugin` 同步升级，不保留旧版兼容分支。
 
 补充说明：上行 `message` 在基础字段之外，支持附带以下可选元数据字段，均由 WAuxiliary 插件端本地查询后自动补充：
 
@@ -146,8 +148,11 @@ openclaw-channel-wap/
 - `sender_group_display_name`：发送者在当前群内的显示名 / 群名片
 - `group_name`：群名称
 - `group_member_count`：群成员数量
+- `is_quote` / `quote_title` / `quote_content` / `quote_sender` / `quote_display_name` / `quote_talker` / `quote_type`：引用消息元数据
 
-以上字段均为向后兼容的可选扩展；旧版插件可以不发送，服务端会自动回退到 `sender` / `talker`。
+下行 `send_text` 额外支持：
+
+- `reply_to_msg_id`：存在时，Android 端使用 `sendQuoteMsg(...)` 发送引用回复
 
 新增协议族：
 
