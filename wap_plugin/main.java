@@ -530,9 +530,13 @@ void onHandleMsg(Object msgInfoBean) {
         return;
     }
 
-    // 仅上报文本消息，其他类型忽略
+    // 群内引用消息在部分版本里可能不是 text，但仍需要进入后续处理。
     boolean isTextMessage = msgInfoBean.isText();
-    if (!isTextMessage) {
+    boolean isQuoteMessage = false;
+    try {
+        isQuoteMessage = msgInfoBean.isQuote();
+    } catch (Exception ignore) {}
+    if (!isTextMessage && !isQuoteMessage) {
         return;
     }
 
@@ -579,7 +583,7 @@ void onHandleMsg(Object msgInfoBean) {
 
     // 构建消息 JSON
     try {
-        String content = buildInboundContent(msgInfoBean, isTextMessage);
+        String content = buildInboundContent(msgInfoBean);
         if (content == null || content.trim().isEmpty()) {
             return;
         }
@@ -686,26 +690,32 @@ void dumpMsgInfoBean(Object msgInfoBean) {
     }
 }
 
-String buildInboundContent(Object msgInfoBean, boolean isTextMessage) {
-    if (isTextMessage) {
-        String text = msgInfoBean.getContent();
-        if (text != null && !text.trim().isEmpty()) {
-            return text;
-        }
-        try {
-            if (msgInfoBean.isQuote()) {
-                Object quoteMsg = msgInfoBean.getQuoteMsg();
-                if (quoteMsg != null) {
-                    String quoteTitle = quoteMsg.getTitle();
-                    return quoteTitle == null ? "" : quoteTitle;
+String buildInboundContent(Object msgInfoBean) {
+    String text = null;
+    try {
+        text = msgInfoBean.getContent();
+    } catch (Exception ignore) {}
+    if (text != null && !text.trim().isEmpty()) {
+        return text;
+    }
+    try {
+        if (msgInfoBean.isQuote()) {
+            Object quoteMsg = msgInfoBean.getQuoteMsg();
+            if (quoteMsg != null) {
+                String quoteTitle = quoteMsg.getTitle();
+                if (quoteTitle != null && !quoteTitle.trim().isEmpty()) {
+                    return quoteTitle;
+                }
+                String quoteContent = quoteMsg.getContent();
+                if (quoteContent != null && !quoteContent.trim().isEmpty()) {
+                    return quoteContent;
                 }
             }
-        } catch (Exception e) {
-            log("解析引用消息正文失败: " + e.getMessage());
         }
-        return text == null ? "" : text;
+    } catch (Exception e) {
+        log("解析引用消息正文失败: " + e.getMessage());
     }
-    return "";
+    return text == null ? "" : text;
 }
 
 void appendInboundQuoteMetadata(JSONObject data, Object msgInfoBean) {
