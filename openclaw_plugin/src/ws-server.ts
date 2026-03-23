@@ -341,30 +341,6 @@ function clearPendingHistory(accountId: string, talker: string) {
   pendingGroupHistories.delete(key);
 }
 
-async function readAllowFromStoreCompat(params: {
-  pairing: OpenClawPluginApi["runtime"]["channel"]["pairing"];
-  channel: string;
-  accountId: string;
-}): Promise<string[]> {
-  const { pairing, channel, accountId } = params;
-  const readAllowFromStore = pairing.readAllowFromStore as unknown as
-    | ((input: { channel: string; accountId: string }) => Promise<string[]>)
-    | ((channel: string, accountId?: string) => Promise<string[]>);
-  try {
-    // Newer OpenClaw runtime expects object-form parameters.
-    return await (readAllowFromStore as (input: { channel: string; accountId: string }) => Promise<string[]>)({
-      channel,
-      accountId,
-    });
-  } catch {
-    // Fallback for older SDK signatures.
-    return await (readAllowFromStore as (channel: string, accountId?: string) => Promise<string[]>)(
-      channel,
-      accountId,
-    );
-  }
-}
-
 export function setWapRuntime(api: OpenClawPluginApi) {
   runtime = api;
 }
@@ -915,8 +891,7 @@ async function processWapInboundMessage(params: {
     : null;
   const storeAllowFrom = isGroup
     ? []
-    : await readAllowFromStoreCompat({
-        pairing: core.channel.pairing,
+    : await core.channel.pairing.readAllowFromStore({
         channel: CHANNEL_ID,
         accountId: client.accountId,
       });

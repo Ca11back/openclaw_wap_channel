@@ -387,7 +387,11 @@ declare module "openclaw/plugin-sdk/core" {
   export type PluginRuntime = {
     channel: {
       pairing: {
-        readAllowFromStore: unknown;
+        readAllowFromStore: (params: {
+          channel: string;
+          accountId: string;
+          env?: unknown;
+        }) => Promise<string[]>;
         upsertPairingRequest: (params: {
           channel: string;
           id: string;
