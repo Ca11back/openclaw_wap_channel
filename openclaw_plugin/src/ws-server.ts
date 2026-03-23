@@ -42,6 +42,7 @@ import type {
   WapSendTextCommand,
   WapUpstreamMessage,
 } from "./protocol.js";
+import { resolveReplyMediaUrls } from "./reply-media.js";
 
 let wss: WebSocketServer | null = null;
 let httpServer: ReturnType<typeof createServer> | null = null;
@@ -1145,12 +1146,18 @@ async function processWapInboundMessage(params: {
   const { dispatcher, replyOptions, markDispatchIdle } =
     core.channel.reply.createReplyDispatcherWithTyping({
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, route.agentId),
-      deliver: async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }) => {
-        const mediaList = payload.mediaUrls?.length
-          ? payload.mediaUrls
-          : payload.mediaUrl
-            ? [payload.mediaUrl]
-            : [];
+      deliver: async (payload: {
+        text?: string;
+        mediaUrl?: string;
+        mediaUrls?: string[];
+        details?: {
+          media?: {
+            mediaUrl?: string;
+            mediaUrls?: string[];
+          } | null;
+        } | null;
+      }) => {
+        const mediaList = resolveReplyMediaUrls(payload);
         const replyText = payload.text ?? "";
 
         if (mediaList.length > 0) {

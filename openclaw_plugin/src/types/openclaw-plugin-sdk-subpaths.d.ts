@@ -141,9 +141,42 @@ declare module "openclaw/plugin-sdk/core" {
       text?: string;
       mediaUrl?: string;
       mediaUrls?: string[];
+      details?: {
+        media?: {
+          mediaUrl?: string;
+          mediaUrls?: string[];
+        } | null;
+      } | null;
       channelData?: Record<string, unknown>;
       replyToId?: string | null;
     };
+  };
+
+  export type ChannelMessageActionDiscoveryContext = {
+    cfg: OpenClawConfig;
+    currentChannelId?: string | null;
+    currentChannelProvider?: string | null;
+    currentThreadTs?: string | null;
+    currentMessageId?: string | number | null;
+    accountId?: string | null;
+    sessionKey?: string | null;
+    sessionId?: string | null;
+    agentId?: string | null;
+    requesterSenderId?: string | null;
+  };
+
+  export type ChannelMessageToolSchemaContribution = {
+    properties: Record<string, unknown>;
+    visibility?: "current-channel" | "all-configured";
+  };
+
+  export type ChannelMessageToolDiscovery = {
+    actions?: readonly string[] | null;
+    capabilities?: readonly string[] | null;
+    schema?:
+      | ChannelMessageToolSchemaContribution
+      | ChannelMessageToolSchemaContribution[]
+      | null;
   };
 
   export type ChannelGatewayContext<ResolvedAccount = unknown> = {
@@ -254,8 +287,13 @@ declare module "openclaw/plugin-sdk/core" {
       };
     };
     actions?: {
-      listActions?: (params: { cfg: OpenClawConfig }) => string[];
+      describeMessageTool?: (
+        params: ChannelMessageActionDiscoveryContext,
+      ) => ChannelMessageToolDiscovery | null | undefined;
       supportsAction?: (params: { action: string }) => boolean;
+      requiresTrustedRequesterSender?: (params: {
+        action: string;
+      }) => boolean;
       extractToolSend?: (params: {
         args: Record<string, unknown>;
       }) => { to: string; accountId?: string | null } | null;
@@ -264,7 +302,13 @@ declare module "openclaw/plugin-sdk/core" {
         action: string;
         cfg: OpenClawConfig;
         params: Record<string, unknown>;
+        requesterSenderId?: string | null;
+        sessionKey?: string | null;
+        sessionId?: string | null;
+        agentId?: string | null;
         accountId?: string | null;
+        toolContext?: Record<string, unknown>;
+        dryRun?: boolean;
       }) => Promise<unknown>;
     };
     outbound?: {
@@ -384,6 +428,12 @@ declare module "openclaw/plugin-sdk/core" {
             text?: string;
             mediaUrl?: string;
             mediaUrls?: string[];
+            details?: {
+              media?: {
+                mediaUrl?: string;
+                mediaUrls?: string[];
+              } | null;
+            } | null;
           }, info: { kind: "tool" | "block" | "final" }) => Promise<void>;
           onError?: (err: unknown, info: { kind: "tool" | "block" | "final" }) => void;
         }) => {

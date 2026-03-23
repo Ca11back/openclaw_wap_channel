@@ -26,6 +26,7 @@ import {
   sendToClient,
 } from "./ws-server.js";
 import { buildWapClientDiagnostics, listWapFriends, listWapGroups, searchWapTarget } from "./operations.js";
+import { resolveReplyMediaUrls } from "./reply-media.js";
 
 function getAccountClientCount(accountId: string): number {
   return getClientStats().filter((client) => client.accountId === accountId).length;
@@ -72,6 +73,12 @@ function parseSendTarget(raw: string): { target: string; kind: "direct" | "group
 
 function decorateCanonicalTarget(target: string): string {
   return target.endsWith("@chatroom") ? `group:${target}` : `user:${target}`;
+}
+
+function describeWapMessageTool() {
+  return {
+    actions: ["search"],
+  };
 }
 
 export const wapPlugin: ChannelPlugin<WapAccount> = {
@@ -218,7 +225,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     },
   },
   actions: {
-    listActions: () => ["search"],
+    describeMessageTool: () => describeWapMessageTool(),
     supportsAction: ({ action }) => action === "search",
     handleAction: async ({ action, params, accountId }) => {
       const runtime = getWapRuntime();
@@ -290,14 +297,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
       }),
     sendPayload: async ({ cfg, to, payload, accountId }) => {
       const payloadText = typeof payload?.text === "string" ? payload.text : "";
-      const mediaListRaw = payload?.mediaUrls?.length
-        ? payload.mediaUrls
-        : payload?.mediaUrl
-          ? [payload.mediaUrl]
-          : [];
-      const mediaList = mediaListRaw
-        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-        .filter((entry): entry is string => Boolean(entry));
+      const mediaList = resolveReplyMediaUrls(payload);
       if (!payloadText && mediaList.length === 0) {
         return { ok: true, channel: CHANNEL_ID };
       }
