@@ -1,49 +1,105 @@
 # 架构说明
 
-## 📐 系统架构
+## 系统结构
 
-```
+```text
 ┌─────────────────┐          WebSocket           ┌──────────────────┐
-│  微信 (WeChat)  │ ◄────────────────────────► │  OpenClaw 服务器  │
+│  微信 (WeChat)  │ ◄────────────────────────► │  OpenClaw Host    │
 │                 │                              │                  │
 │  ┌───────────┐  │   1. 入站消息 (message)      │  ┌────────────┐  │
-│  │ WAuxiliary│  │   ──────────────────────►   │  │  Channel   │  │
-│  │  Plugin   │  │                              │  │  (本插件)  │  │
-│  └───────────┘  │   2. 回复命令 (send_*)       │  └────────────┘  │
-│                 │   ◄──────────────────────    │         │        │
-│                 │   3. 能力上报 (capabilities) │         ▼        │
-│                 │   ──────────────────────►    │  ┌────────────┐  │
-│                 │   4. 主动查询 (rpc_*)        │  │  核心 AI   │  │
-│                 │   ◄──────────────────────►   │  │ + WeChat工具│  │
+│  │ WAuxiliary│  │   ──────────────────────►   │  │  WAP       │  │
+│  │  Plugin   │  │                              │  │  Channel   │  │
+│  └───────────┘  │   2. 主动查询 (rpc_*)        │  └────────────┘  │
+│                 │   ◄──────────────────────►   │         │        │
+│                 │   3. 发送命令 (send_*)       │         ▼        │
+│                 │   ◄──────────────────────    │  ┌────────────┐  │
+│                 │   4. 发送回执 (command_result)│ │ OpenClaw AI │  │
+│                 │   ──────────────────────►    │  │ + actions  │  │
 └─────────────────┘                              │  └────────────┘  │
                                                  └──────────────────┘
 ```
 
-## 🔄 消息流程
+## 设计原则
 
-### 接收用户消息
+WAP 主动能力拆成两层：
+
+1. discovery
+
+- Android 侧枚举好友、群聊、候选目标
+- Host 侧只做转发和结构化
+- discovery 不隐藏不可发送候选
+
+2. send
+
+- Host / agent 只接受 typed canonical target
+- Android 下行只接受最终 canonical talker
+- 发送阶段不做模糊匹配
+- 发送结果必须回传结构化错误
+
+这与 Lark 的方向一致：
+
+- 发现层单独返回候选标识
+- 发送层单独消费稳定标识
+- 不把“查找、权限、发送”混成一个接口
+
+## Canonical Target
+
+上层统一使用：
+
+- `user:<wxid>`
+- `group:<talker@chatroom>`
+
+Android 下行 `send_*` 命令中只使用最终 talker：
+
+- direct: `wxid`
+- group: `*@chatroom`
+
+## 核心流程
+
+### 1. 入站消息
+
 1. 用户在微信发送消息
-2. WAuxiliary 插件拦截消息
-3. 插件检查白名单，通过 WebSocket 转发到服务器
-4. OpenClaw Channel 接收并解析消息
-5. 转发给 OpenClaw AI 核心处理
+2. WAuxiliary 插件拦截消息并做本地预过滤
+3. Android 插件通过 WebSocket 上报 `message`
+4. Host channel 组装上下文并调用 OpenClaw reply pipeline
 
-### 发送 AI 回复
-1. OpenClaw AI 生成回复
-2. Channel 通过 WebSocket 发送 `resolve_target` 预解析目标
-3. WAuxiliary 返回 `resolve_target_result`（最终 wxid / 群 talker）
-4. Channel 使用解析后的目标发送 `send_text` / `send_image` / `send_file`
-5. WAuxiliary 插件接收指令并调用微信 API 发送消息
+### 2. Discovery
 
-### 主动工具调用
-1. OpenClaw Agent/skill 调用 `wechat_*` 工具
-2. Host 侧插件通过 `rpc_request` 查询好友、群聊或目标解析
-3. WAuxiliary 返回 `rpc_result`
-4. Host 侧根据返回结果选择继续发送 `send_text` 或返回结构化结果给工具调用方
+1. agent 或 skill 调用 `wechat_lookup_targets`
+2. Host channel 发送 `rpc_request(method=lookup_targets)`
+3. Android 插件执行好友 / 群匹配
+4. Android 返回 `rpc_result`
+5. Host 将候选返回给 agent
 
-## 🤝 能力握手
+### 3. Send
 
-客户端连接并收到 `config` 后，会主动发送 `capabilities`：
+1. agent 使用 message `send` action，目标必须是 typed canonical target
+2. Host 在发送前用 `lookup_targets` 做 canonical preflight
+3. Host 将 typed canonical target 解包成最终 talker，发送 `send_text` / `send_image` / `send_file`
+4. Android 校验 canonical talker、权限、速率限制并实际发送
+5. Android 返回 `command_result`
+
+## 协议面
+
+### 上行类型
+
+- `message`
+- `capabilities`
+- `rpc_result`
+- `command_result`
+
+### 下行类型
+
+- `config`
+- `ping`
+- `rpc_request`
+- `send_text`
+- `send_image`
+- `send_file`
+
+### 能力协商
+
+`capabilities.data` 当前包含：
 
 - `protocol_version`
 - `client_name`
@@ -52,116 +108,105 @@
 - `command_types`
 - `features`
 
-Host 侧会缓存这些能力，用于：
+当前快照：
 
-- 工具/命令诊断输出
-- 后续能力判定
-- 为未来的能力协商和渐进扩展打基础
+- `protocol_version = wap-vnext-2026-03-24`
+- `client_version = 5.0.0`
+- `rpc_methods = ["get_friends", "get_groups", "lookup_targets"]`
+- `command_types = ["send_text", "send_image", "send_file"]`
 
-## 🔒 安全机制
+## Discovery 输出模型
 
-| 层级 | 措施 | 位置 |
-|------|------|------|
-| **连接认证** | Bearer Token | 插件 + 服务器 |
-| **入站控制** | allowFrom / groupAllowFrom（服务端下发） | 插件 |
-| **出站控制** | 私聊 allowFrom 验证 | 插件 |
-| **群聊门禁** | groupPolicy/groupAllowChats + `groups.*.(enabled/groupPolicy/allowFrom/requireMention)` | 插件 + 服务端 |
-| **DM 策略** | pairing / allowlist / open / disabled | 服务端 |
-| **静默配对** | 未授权只登记 pairing 请求，不自动回消息 | 服务端 |
-| **速率限制** | 30条/分钟 | 插件 |
-| **消息重试** | 最多3次，30秒TTL | 插件 |
-| **日志脱敏** | URL/Token 掩码 | 插件 |
+`lookup_targets` 返回：
 
-## 🧭 群级覆盖
+- `query`
+- `kind`
+- `count`
+- `candidates`
 
-WAP v4 当前支持一组最小但真实生效的 Feishu 风格群级覆盖：
+每个 candidate 至少包含：
 
-- `groups."*"`：默认群级配置
-- `groups."<talker>"`：精确群级配置
-- `enabled`：关闭某个群的入站处理
-- `groupPolicy` / `allowFrom`：控制群内哪些发送者可以触发
-- `requireMention`：覆盖默认 @ 门禁
-- `tools`：宿主侧工具 allow/deny
-- `skills`：宿主侧技能 allowlist
-- `systemPrompt`：宿主侧额外群上下文提示
+- `canonical_target`
+- `talker`
+- `target_kind`
+- `display_name`
+- `matched_by`
+- `score`
+- `send_status`
+- `send_status_reason`
 
-实现边界：
+direct candidate 可额外带：
 
-- `enabled` / `groupPolicy` / `allowFrom` / `requireMention` 会同步到 Android 端本地预过滤
-- `tools` / `skills` / `systemPrompt` 只在宿主侧生效
-- `skills` 通过 `replyOptions.skillFilter` 注入 OpenClaw reply pipeline；如果 agent 本身配置了 `skills`，最终取交集
+- `remark`
+- `nickname`
+- `alias`
 
-## 📦 目录结构
+group candidate 可额外带：
 
-```
-openclaw-channel-wap/
-├── README.md                    # 总体说明
-├── LICENSE                      # MIT 许可证
-├── .gitignore                   # Git 忽略配置
-│
-├── wap_plugin/                  # WAuxiliary 插件（Android）
-│   ├── README.md                # 插件安装和配置说明
-│   ├── main.java                # 插件主代码
-│   └── info.prop                # 插件元数据
-│
-└── openclaw_plugin/             # OpenClaw Channel（npm包）
-    ├── README.md                # Channel 使用说明
-    ├── package.json             # npm 包配置
-    ├── openclaw.plugin.json     # OpenClaw 插件元数据
-    ├── index.ts                 # 入口文件
-    ├── src/                     # 源代码
-    │   ├── channel.ts           # Channel 实现
-    │   ├── commands.ts          # /wap 与 CLI 诊断命令
-    │   ├── operations.ts        # 主动工具与目录复用的高层操作
-    │   ├── tools.ts             # wechat_* 工具注册
-    │   ├── ws-server.ts         # WebSocket 服务器与 RPC/能力缓存
-    │   └── protocol.ts          # 通信协议定义
-    └── test/                    # 测试工具
-        ├── standalone-server.ts # 独立服务器测试
-        └── mock-client.ts       # 模拟客户端测试
-```
+- `group_name`
 
-## 🚀 部署建议
+## 发送失败分类
 
-### 开发环境
-- 插件：直接修改 `main.java` 配置后加载到 WAuxiliary
-- Channel：使用 `npm run test:server` 单独测试
+Android 侧 `command_result` 当前显式回传：
 
-### 生产环境
-- 使用 **WSS**（加密 WebSocket）而非 WS
-- 配置强 Token（32+ 字符随机字符串）
-- 严格配置白名单（双向）
-- 使用反向代理（如 Nginx）处理 SSL
-- 定期检查日志中的安全拦截记录
+- `invalid_canonical_target`
+- `not_friend`
+- `blocked_by_allow_from`
+- `invalid_group`
+- `rate_limited`
+- `send_failed`
 
-## 📝 协议版本
+Host 侧在 preflight 或传输层还会补充：
 
-当前版本：**v4.0.0**
+- `target_not_found`
+- `no_connected_client`
 
-协议快照：`wap-vnext-2026-03-23`
+## 安全边界
 
-兼容性：当前实现直接按最新协议处理，要求 host 与 `wap_plugin` 同步升级，不保留旧版兼容分支。
+### Android 本地
 
-补充说明：上行 `message` 在基础字段之外，支持附带以下可选元数据字段，均由 WAuxiliary 插件端本地查询后自动补充：
+- `allowFrom` 控制私聊主动发送目标
+- `groupPolicy` / `groupAllowChats` / `groups.<talker>.*` 控制入站群聊过滤
+- 发送速率限制默认 30 条 / 分钟
+- `send_*` 仅接受 canonical talker
 
-- `sender_display_name`：发送者展示名（优先好友备注 / 昵称）
-- `sender_group_display_name`：发送者在当前群内的显示名 / 群名片
-- `group_name`：群名称
-- `group_member_count`：群成员数量
-- `is_quote` / `quote_title` / `quote_content` / `quote_sender` / `quote_display_name` / `quote_talker` / `quote_type`：引用消息元数据
+### Host 侧
 
-下行 `send_text` 额外支持：
+- 配置账户隔离
+- message `send` 仅接受 typed canonical target
+- 发送前强制 canonical preflight
+- discovery tools 与 message action 分离
 
-- `reply_to_msg_id`：存在时，Android 端使用 `sendQuoteMsg(...)` 发送引用回复
+## 群级覆盖
 
-新增协议族：
+当前保留以下群级覆盖：
 
-- `capabilities`
-- `rpc_request`
-- `rpc_result`
+- `groups."*"` 默认配置
+- `groups."<talker>"` 精确覆盖
+- `enabled`
+- `groupPolicy`
+- `allowFrom`
+- `requireMention`
+- `tools`
+- `skills`
+- `systemPrompt`
 
-当前主动 RPC 方法：
+边界：
 
-- `get_friends`
-- `get_groups`
-- `search_target`
+- `enabled` / `groupPolicy` / `allowFrom` / `requireMention` 下发到 Android 端
+- `tools` / `skills` / `systemPrompt` 只在 Host 侧生效
+
+## 当前标准对齐
+
+WAP 当前实现按最新 OpenClaw 标准对齐：
+
+- discovery 使用普通 tool
+- 主动发送使用 message `send` action
+- 不再保留旧 `wechat_send_*` 风格主动发送工具
+- 不再保留 `resolve_target` 风格发送前预解析协议
+
+## 版本
+
+- WAP version: `5.0.0`
+- Protocol snapshot: `wap-vnext-2026-03-24`
+- 要求 Host 与 `wap_plugin` 同步升级

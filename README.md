@@ -1,43 +1,42 @@
 # OpenClaw WAP Channel
 
-通过 WAuxiliary 将微信消息桥接到 OpenClaw AI 助手的完整方案（支持文本、图片、文件发送）。
+通过 WAuxiliary 将微信消息接入 OpenClaw，并按当前 OpenClaw 标准提供消息搜索与主动发送能力。
 
-## v4 重点变化
+## v5 设计
 
-- 当前版本按 **v4.0.0** 处理，允许不兼容旧版 `wap_plugin`
-- `openclaw_plugin` 现在按 OpenClaw 官方推荐方式使用 SDK 子路径，不再依赖单体式 `openclaw/plugin-sdk` root barrel；宿主侧建议使用 `openclaw >= 2026.3.11`
-- 除了被动接收入站消息，`openclaw_plugin` 现在还会注册主动 WeChat 工具：
-  - `wechat_get_friends`
-  - `wechat_get_groups`
+- 当前版本为 **v5.0.0**
+- 协议快照为 `wap-vnext-2026-03-24`
+- 不兼容旧版 `wap_plugin`
+- 不再保留旧接口：
+  - `search_target`
+  - `resolve_target`
+  - `resolve_target_result`
   - `wechat_search_target`
   - `wechat_send_text`
   - `wechat_send_image`
   - `wechat_send_file`
-  - `wechat_capabilities`
-- WA 客户端会在连接后主动上报能力，并支持宿主侧通过 `rpc_request` / `rpc_result` 查询好友、群聊、目标解析等能力
-- 新增基础诊断命令：
-  - `/wap doctor`
-  - `/wap capabilities`
-  - `openclaw wap-diagnose`
+- 主动查询与主动发送按两层拆分：
+  - discovery: `wechat_lookup_targets`
+  - send: OpenClaw 标准 message `send` action
 
-## 组件说明
+## 组件
 
-本仓库包含两个必须配套使用的组件：
-
-| 组件 | 类型 | 安装方式 | 说明 |
-|------|------|----------|------|
-| `openclaw_plugin/` | OpenClaw Channel（服务端） | `openclaw plugins install` | 接收消息、执行策略、调用 OpenClaw AI，并注册主动 WeChat 工具 |
-| `wap_plugin/` | WAuxiliary 插件（客户端） | 手动安装 | 接收服务端策略并在本地过滤/发送微信消息，同时提供好友/群聊/目标解析 RPC 能力 |
+| 组件 | 类型 | 说明 |
+|---|---|---|
+| `openclaw_plugin/` | OpenClaw channel plugin | 接收入站消息、注册 discovery 工具、暴露 `search`/`send` action、转发主动发送 |
+| `wap_plugin/` | WAuxiliary Android 插件 | 上报消息、枚举好友/群、执行 `lookup_targets`、实际发送消息 |
 
 ## 快速开始
 
-### 1. 安装服务端（OpenClaw Channel）
+### 1. 安装服务端插件
 
 ```bash
 openclaw plugins install openclaw-channel-wap
 ```
 
-### 2. 配置服务端（`~/.openclaw/openclaw.json`）
+### 2. 配置服务端
+
+`~/.openclaw/openclaw.json` 示例：
 
 ```json
 {
@@ -73,7 +72,7 @@ openclaw plugins install openclaw-channel-wap
             "*": {
               "requireMention": true,
               "tools": {
-                "deny": ["wechat_send_file"]
+                "allow": ["wechat_lookup_targets", "wechat_capabilities"]
               }
             },
             "123456789@chatroom": {
@@ -82,10 +81,7 @@ openclaw plugins install openclaw-channel-wap
               "allowFrom": ["wxid_owner_a", "wxid_operator_a"],
               "requireMention": false,
               "skills": ["product-search", "release-checklist"],
-              "systemPrompt": "这是产品群，优先给出结论和下一步。",
-              "tools": {
-                "allow": ["wechat_send_text", "wechat_send_image"]
-              }
+              "systemPrompt": "这是产品群，优先给出结论和下一步。"
             }
           }
         }
@@ -95,7 +91,7 @@ openclaw plugins install openclaw-channel-wap
 }
 ```
 
-### 3. 安装并配置客户端（WAuxiliary 插件）
+### 3. 配置 Android 插件
 
 编辑 `wap_plugin/config.yml`：
 
@@ -111,296 +107,220 @@ max_pending_messages: 5
 message_ttl_ms: 30000
 ```
 
-然后将 `wap_plugin` 目录复制到 WAuxiliary 插件目录并启用。
+将 `wap_plugin/` 复制到 WAuxiliary 插件目录并启用。
 
-## 服务端配置字段
+## Discovery 与 Send
 
-| 字段 | 说明 |
-|---|---|
-| `host` | WebSocket 监听地址（默认 `127.0.0.1`） |
-| `port` | WebSocket 服务端口（全局） |
-| `authToken` | 全局连接 token（可被账户级覆盖） |
-| `allowFrom` | 私聊允许列表 |
-| `groupPolicy` | 群策略：`open/allowlist/disabled` |
-| `groupAllowChats` | `groupPolicy=allowlist` 时允许触发的群 talker 列表（支持 `*`） |
-| `groupAllowFrom` | 群聊发送者允许列表 |
-| `noMentionContextGroups` | 允许“未@仅记录上下文”的群列表（需手动配置，支持 `*`） |
-| `noMentionContextHistoryLimit` | 每个群保留的未@上下文条数（默认 8） |
-| `dmPolicy` | `pairing/allowlist/open/disabled` |
-| `requireMentionInGroup` | 群聊是否必须 @ 机器人 |
-| `silentPairing` | pairing 模式下是否静默拦截（不自动回配对码） |
-| `groups."*"` | 默认群级覆盖项 |
-| `groups."<talker>".enabled` | 单群启停 |
-| `groups."<talker>".groupPolicy` | 单群发送者策略：`open/allowlist/disabled` |
-| `groups."<talker>".allowFrom` | 单群发送者 allowlist |
-| `groups."<talker>".requireMention` | 单群是否必须 @ |
-| `groups."<talker>".tools` | 单群工具 allow/deny（宿主侧） |
-| `groups."<talker>".skills` | 单群技能 allowlist（宿主侧） |
-| `groups."<talker>".systemPrompt` | 单群上下文提示（宿主侧） |
-| `accounts.<id>.*` | 账户级配置（覆盖全局字段） |
+### Discovery tools
 
-## 主动工具与诊断命令
+当前注册的主动工具：
 
-当前插件除了普通 channel 出入站流程，还会注册以下 OpenClaw 工具：
+- `wechat_get_friends`
+- `wechat_get_groups`
+- `wechat_lookup_targets`
+- `wechat_capabilities`
 
-- `wechat_get_friends`：读取当前账号好友列表
-- `wechat_get_groups`：读取当前账号群聊列表
-- `wechat_search_target`：将关键字目标解析为 canonical `user:wxid` / `group:*@chatroom`
-- `wechat_send_text`：主动发送文本消息
-- `wechat_send_image`：主动发送图片，支持远端 URL 或宿主机本地文件路径
-- `wechat_send_file`：主动发送文件，支持远端 URL 或宿主机本地文件路径
-- `wechat_capabilities`：查看已连接 WA 客户端的能力声明
+`wechat_lookup_targets` 用于“先找，再选，再发”。它返回候选列表，而不是单个解析结果。
 
-当前 WAP 的 channel action 仅公开 `search`；主动发送统一走上述 `wechat_send_*` 工具，不再保留隐式 `send` action 兼容入口。
+返回候选字段包括：
 
-当前插件还会注册以下命令：
+- `canonicalTarget`
+- `targetKind`
+- `talker`
+- `displayName`
+- `remark`
+- `nickname`
+- `alias`
+- `groupName`
+- `matchedBy`
+- `score`
+- `sendStatus`
+- `sendStatusReason`
 
-- `/wap doctor`
-- `/wap capabilities`
-- `/wap help`
-- `openclaw wap-diagnose`
+### Message actions
 
-## 客户端行为与过滤原则
+当前 channel message tool 支持：
 
-- 客户端连接后接收服务端下发配置：`allow_from/group_policy/group_allow_chats/group_allow_from/no_mention_context_groups/dm_policy/require_mention_in_group/silent_pairing/groups`。
-- 群聊按本地顺序过滤：`group_policy` -> `group_allow_chats` -> `groups.<talker>.enabled` -> `groups.<talker>.groupPolicy/allowFrom` -> `@` 门禁。
-- 默认维持“群内必须 @ 才触发回复”；只有命中 `no_mention_context_groups` 的群，未@消息才会上报用于上下文记录（不触发当次回复）。
-- `groups."*"` 作为默认群级覆盖项，`groups."<talker>"` 作为精确覆盖项。
-- `tools` / `skills` / `systemPrompt` 在宿主侧生效；`enabled` / `groupPolicy` / `allowFrom` / `requireMention` 会同步到 Android 端本地预过滤。
-- `groups.<talker>.skills` 会作为当前群聊的 `skillFilter` 传给 OpenClaw reply pipeline；如果 agent 本身也配置了 `skills`，最终效果是两者取交集。
-- pairing 模式支持静默拦截。
+- `search`
+- `send`
 
-## 发送目标与解析规则
+主动发送不再走 `wechat_send_*` 工具，而是走 OpenClaw 标准 message `send` action。
 
-支持的目标格式：
+## Canonical Target
 
-- 直接 ID：`wxid_xxx` / `123456789@chatroom`
-- 好友名称：`friend:张三`（也支持 `remark:` / `nickname:` / `name:`）
-- 群名称：`group:产品讨论群`（也支持 `room:`）
+Host / agent 统一使用 typed canonical target：
 
-解析与发送原则：
+- `user:<wxid>`
+- `group:<talker@chatroom>`
 
-- 名称解析在 WAuxiliary 客户端执行。
-- 重名冲突会拒绝发送并要求改用 ID。
-- 私聊解析优先级：`备注 > 昵称(含 alias) > wxid`。
-- 私聊目标必须是好友；若目标 wxid 不在好友列表，直接视为发送失败。
+发送链路规则：
 
-## 群内 @ 模板
+- lookup 返回 typed canonical target
+- message `send` 只接受 typed canonical target
+- Android 下行 `send_*` 命令只接受最终 canonical talker：
+  - 私聊：`wxid`
+  - 群聊：`*@chatroom`
+- 发送阶段不再做昵称/备注模糊解析
 
-当目标为群时，消息内容支持 `{{at:...}}`，发送前会转为 `[AtWx=...]`：
+## `sendStatus` 语义
 
-- `{{at:wxid_xxx}}`：按 wxid @
-- `{{at:张三}}`：按群内显示名/昵称解析 @
-- `{{at:remark:张三}}`：按备注/昵称关键字解析 @
+`wechat_lookup_targets` 会区分“查得到”和“发得出去”：
+
+- `sendable`
+- `not_friend`
+- `blocked_by_allow_from`
+- `invalid_group`
+- `unknown`
+
+discovery 不会因为目标不可发送就把候选吞掉。
 
 ## 协议
 
-上行 `message` 示例：
+### 上行 `capabilities`
 
-```json
-{
-  "type": "message",
-  "data": {
-    "msg_id": 12345678,
-    "msg_type": 1,
-    "talker": "wxid_or_groupid",
-    "sender": "wxid_xxx",
-    "sender_display_name": "张三",
-    "sender_group_display_name": "前端-张三",
-    "group_name": "OpenClaw 开发群",
-    "group_member_count": 128,
-    "content": "消息内容",
-    "timestamp": 1706600000000,
-    "is_private": true,
-    "is_group": false,
-    "is_at_me": false,
-    "at_user_list": [],
-    "is_quote": true,
-    "quote_title": "你看下这个",
-    "quote_content": "上一条被引用的原消息",
-    "quote_sender": "wxid_peer",
-    "quote_display_name": "李四",
-    "quote_talker": "wxid_peer",
-    "quote_type": 1
-  }
-}
-```
-
-说明：`sender_display_name`、`sender_group_display_name`、`group_name`、`group_member_count`、`is_quote`、`quote_*` 为插件端本地补充的消息元数据。当前实现要求 host 与 `wap_plugin` 同步升级。
-
-上行 `capabilities` 示例（客户端连接并收到配置后主动上报）：
+客户端在连接并收到 `config` 后主动上报：
 
 ```json
 {
   "type": "capabilities",
   "data": {
-    "protocol_version": "wap-vnext-2026-03-23",
+    "protocol_version": "wap-vnext-2026-03-24",
     "client_name": "openclaw-channel-wap",
-    "client_version": "4.0.0",
-    "rpc_methods": ["get_friends", "get_groups", "search_target"],
-    "command_types": ["resolve_target", "send_text", "send_image", "send_file"],
-    "features": ["capabilities", "rpc", "group_mentions", "local_media_cache", "quote_reply", "quote_inbound"]
+    "client_version": "5.0.0",
+    "rpc_methods": ["get_friends", "get_groups", "lookup_targets"],
+    "command_types": ["send_text", "send_image", "send_file"],
+    "features": ["capabilities", "rpc", "lookup_targets", "command_result", "group_mentions", "local_media_cache", "quote_reply", "quote_inbound"]
   }
 }
 ```
 
-下行 `config` 示例：
+### 下行 `rpc_request`
 
-```json
-{
-  "type": "config",
-  "data": {
-    "allow_from": ["wxid_owner"],
-    "group_policy": "allowlist",
-    "group_allow_chats": ["123456789@chatroom"],
-    "group_allow_from": ["wxid_owner"],
-    "no_mention_context_groups": ["123456789@chatroom"],
-    "dm_policy": "pairing",
-    "require_mention_in_group": true,
-    "silent_pairing": true
-  }
-}
-```
-
-下行 `resolve_target` 示例（发送前目标预解析）：
-
-```json
-{
-  "type": "resolve_target",
-  "data": {
-    "request_id": "a9f6c2f3-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "target": "friend:HH"
-  }
-}
-```
-
-上行 `resolve_target_result` 示例：
-
-```json
-{
-  "type": "resolve_target_result",
-  "data": {
-    "request_id": "a9f6c2f3-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "target": "friend:HH",
-    "ok": true,
-    "resolved_talker": "wxid_xxx",
-    "target_kind": "direct"
-  }
-}
-```
-
-说明：`send_text` / `send_image` / `send_file` 的 `talker` 仅应传入 canonical 标识（好友 `wxid` 或群 `*@chatroom`）。昵称/备注/关键字目标需先通过 `resolve_target` 解析。
-
-下行 `rpc_request` 示例（主动查询好友列表）：
+查询目标候选：
 
 ```json
 {
   "type": "rpc_request",
   "data": {
     "request_id": "9e40b4fe-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "method": "get_friends",
-    "params": {}
+    "method": "lookup_targets",
+    "params": {
+      "query": "Brown",
+      "kind": "all",
+      "limit": 10
+    }
   }
 }
 ```
 
-上行 `rpc_result` 示例（好友列表返回）：
+### 上行 `rpc_result`
+
+`lookup_targets` 返回候选列表：
 
 ```json
 {
   "type": "rpc_result",
   "data": {
     "request_id": "9e40b4fe-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "method": "get_friends",
+    "method": "lookup_targets",
     "ok": true,
     "result": {
-      "friends": [
+      "query": "Brown",
+      "kind": "all",
+      "count": 2,
+      "candidates": [
         {
-          "wxid": "wxid_xxx",
-          "remark": "Admin",
-          "nickname": "CopyDog",
-          "display_name": "Admin",
-          "sendable": true
+          "canonical_target": "user:wxid_brown",
+          "talker": "wxid_brown",
+          "target_kind": "direct",
+          "display_name": "Brown",
+          "remark": "Brown",
+          "matched_by": "remark_exact",
+          "score": 120,
+          "send_status": "sendable"
+        },
+        {
+          "canonical_target": "user:wxid_brown_ops",
+          "talker": "wxid_brown_ops",
+          "target_kind": "direct",
+          "display_name": "Brown Ops",
+          "nickname": "Brown",
+          "matched_by": "nickname_exact",
+          "score": 110,
+          "send_status": "blocked_by_allow_from",
+          "send_status_reason": "target is not in allowFrom"
         }
-      ],
-      "count": 1
+      ]
     }
   }
 }
 ```
 
-下行 `send_text` 示例：
+### 下行 `send_text`
 
 ```json
 {
   "type": "send_text",
   "data": {
-    "talker": "wxid_or_groupid",
-    "content": "AI 回复内容",
+    "request_id": "a9f6c2f3-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "talker": "wxid_xxx",
+    "content": "早上好",
     "reply_to_msg_id": 12345678
   }
 }
 ```
 
-说明：`reply_to_msg_id` 存在时，`wap_plugin` 会优先调用 `sendQuoteMsg(...)`，以引用该条消息的方式发送文本回复。
+说明：
 
-下行 `send_image` 示例：
+- `talker` 必须是最终 canonical talker，不是备注、昵称或关键字
+- `reply_to_msg_id` 存在时，Android 端优先尝试引用回复
+
+### 上行 `command_result`
 
 ```json
 {
-  "type": "send_image",
+  "type": "command_result",
   "data": {
-    "talker": "wxid_or_groupid",
-    "image_url": "https://example.com/a.jpg",
-    "caption": "可选图片说明"
+    "request_id": "a9f6c2f3-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "command_type": "send_text",
+    "ok": false,
+    "error_code": "blocked_by_allow_from",
+    "error": "target is not in allowFrom"
   }
 }
 ```
 
-下行 `send_file` 示例（WAux 客户端会下载文件到插件目录 `files/` 并调用 `shareFile` 发送）：
+成功时返回 `result`，失败时返回：
 
-```json
-{
-  "type": "send_file",
-  "data": {
-    "talker": "wxid_or_groupid",
-    "file_url": "https://example.com/demo.pdf",
-    "file_name": "demo.pdf",
-    "caption": "可选文件说明"
-  }
-}
-```
-当 gateway 仅拿到本地文件路径时，`openclaw_plugin` 会自动注册临时文件（同端口 HTTP endpoint，鉴权复用 `authToken`），并下发 `file_id`（可选 `account_id`）；WAux 客户端基于本地 `server_url` 拼接下载地址，不走 WebSocket 传文件内容。
+- `invalid_canonical_target`
+- `not_friend`
+- `blocked_by_allow_from`
+- `invalid_group`
+- `rate_limited`
+- `send_failed`
 
-本地文件下发也支持仅传 `file_id`（以及可选 `account_id`），由 WAux 客户端根据 `server_url` 自动拼接下载地址：
+## 群内 @ 模板
 
-```json
-{
-  "type": "send_file",
-  "data": {
-    "talker": "wxid_or_groupid",
-    "file_id": "3f5f7d63-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "account_id": "default",
-    "file_name": "demo.pdf",
-    "caption": "可选文件说明"
-  }
-}
-```
+当目标为群时，文本与 caption 支持 `{{at:...}}`，发送前会转换成 `[AtWx=...]`：
 
-## 目录文档说明
+- `{{at:wxid_xxx}}`
+- `{{at:张三}}`
+- `{{at:remark:张三}}`
 
-- `openclaw_plugin/README.md`：服务端子模块简述（详细以本主 README 为准）
-- `wap_plugin/README.md`：客户端子模块简述（详细以本主 README 为准）
-- `ARCHITECTURE.md`：架构与协议补充说明
+## 诊断命令
 
-## 开发验证
+当前还会注册：
+
+- `/wap doctor`
+- `/wap capabilities`
+- `/wap help`
+- `openclaw wap-diagnose`
+
+## 校验
+
+服务端最小校验命令：
 
 ```bash
-cd openclaw_plugin
-pnpm install
+cd openclaw-channel-wap/openclaw_plugin
 pnpm exec tsc --noEmit
 ```
-
-## 许可
-
-MIT License

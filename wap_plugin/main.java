@@ -1536,30 +1536,15 @@ boolean checkAndIncreaseSendRateLimit() {
     return true;
 }
 
-String resolveAndValidateOutboundTalker(String rawTalker, String commandType) {
-    String resolvedTalker = resolveOutboundTalker(rawTalker);
-    if (resolvedTalker == null || resolvedTalker.isEmpty()) {
-        log(commandType + " 目标解析失败，无法发送: " + rawTalker);
-        return null;
-    }
-
-    boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
-    if (!isGroupTalker && !isFriendWxid(resolvedTalker)) {
-        log("【安全】拒绝发送私聊：目标不是当前账号好友: " + resolvedTalker);
-        return null;
-    }
-    if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(resolvedTalker))) {
-        log("【安全】拒绝发送消息到非 allowFrom 用户: " + resolvedTalker);
-        return null;
-    }
-    return resolvedTalker;
-}
-
-String validateCanonicalOutboundTalker(String rawTalker, String commandType) {
+JSONObject validateCanonicalOutboundTarget(String rawTalker, String commandType) {
+    JSONObject result = new JSONObject();
     String talker = normalizeTargetText(rawTalker).trim();
     if (talker.isEmpty()) {
         log(commandType + " 缺少目标 talker");
-        return null;
+        result.put("ok", false);
+        result.put("error_code", "invalid_canonical_target");
+        result.put("error", commandType + " requires canonical talker");
+        return result;
     }
     // send_* 仅接受解析后的 canonical talker，禁止在发送阶段做昵称/备注匹配
     if (startsWithIgnoreCase(talker, "group:") ||
@@ -1574,19 +1559,50 @@ String validateCanonicalOutboundTalker(String rawTalker, String commandType) {
         startsWithIgnoreCase(talker, "id:") ||
         startsWithIgnoreCase(talker, "wxid:")) {
         log(commandType + " 仅接受 canonical talker（wxid 或 @chatroom），当前为待解析目标: " + rawTalker);
-        return null;
+        result.put("ok", false);
+        result.put("error_code", "invalid_canonical_target");
+        result.put("error", "send commands require canonical talker only");
+        return result;
     }
 
     boolean isGroupTalker = looksLikeGroupTalker(talker);
-    if (!isGroupTalker && !isFriendWxid(talker)) {
+    if (isGroupTalker) {
+        if (!isKnownGroupTalker(talker)) {
+            log("【安全】拒绝发送群消息：目标群不存在或不可用: " + talker);
+            result.put("ok", false);
+            result.put("error_code", "invalid_group");
+            result.put("error", "group talker is not available on the connected account");
+            return result;
+        }
+        result.put("ok", true);
+        result.put("talker", talker);
+        return result;
+    }
+
+    if (!looksLikeWxid(talker)) {
+        log("【安全】拒绝发送私聊：目标不是 canonical wxid: " + talker);
+        result.put("ok", false);
+        result.put("error_code", "invalid_canonical_target");
+        result.put("error", "direct talker must be canonical wxid");
+        return result;
+    }
+    if (!isFriendWxid(talker)) {
         log("【安全】拒绝发送私聊：目标不是当前账号好友或非 canonical wxid: " + talker);
-        return null;
+        result.put("ok", false);
+        result.put("error_code", "not_friend");
+        result.put("error", "target is not a friend of the connected account");
+        return result;
     }
-    if (!isGroupTalker && ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(talker))) {
+    if (ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(talker))) {
         log("【安全】拒绝发送消息到非 allowFrom 用户: " + talker);
-        return null;
+        result.put("ok", false);
+        result.put("error_code", "blocked_by_allow_from");
+        result.put("error", "target is not in allowFrom");
+        return result;
     }
-    return talker;
+    result.put("ok", true);
+    result.put("talker", talker);
+    return result;
 }
 
 boolean isHttpUrl(String rawUrl) {
@@ -1780,43 +1796,117 @@ File getPendingFilesDir() {
 // 处理服务器指令
 // ============================================================
 
-void sendResolveTargetResult(String requestId, String target, String resolvedTalker, String targetKind, String errorMessage) {
+void sendCommandResult(String requestId, String commandType, Object result, String errorCode, String errorMessage) {
     try {
+        if (requestId == null || requestId.trim().isEmpty()) {
+            return;
+        }
         if (webSocket == null || !isConnected) {
             return;
         }
         JSONObject payload = new JSONObject();
-        payload.put("type", "resolve_target_result");
+        payload.put("type", "command_result");
 
         JSONObject data = new JSONObject();
-        data.put("request_id", requestId == null ? "" : requestId);
-        data.put("target", target == null ? "" : target);
+        data.put("request_id", requestId.trim());
+        data.put("command_type", commandType == null ? "" : commandType);
 
-        boolean ok = resolvedTalker != null && !resolvedTalker.trim().isEmpty() && (errorMessage == null || errorMessage.trim().isEmpty());
+        boolean ok = errorCode == null || errorCode.trim().isEmpty();
         data.put("ok", ok);
-        data.put("target_kind", targetKind == null || targetKind.trim().isEmpty() ? "unknown" : targetKind);
         if (ok) {
-            data.put("resolved_talker", resolvedTalker);
-            log("resolve_target_result 回传: request_id=" + requestId + ", target=" + target + ", resolved_talker=" + resolvedTalker + ", kind=" + targetKind + ", ok=true");
+            data.put("result", result == null ? new JSONObject() : result);
+            log("command_result 回传: request_id=" + requestId + ", command_type=" + commandType + ", ok=true");
         } else {
-            data.put("error", errorMessage == null || errorMessage.trim().isEmpty() ? "target resolve failed" : errorMessage);
-            log("resolve_target_result 回传: request_id=" + requestId + ", target=" + target + ", kind=" + targetKind + ", ok=false, error=" + data.getString("error"));
+            data.put("error_code", errorCode.trim());
+            data.put("error", errorMessage == null || errorMessage.trim().isEmpty() ? "command failed" : errorMessage.trim());
+            log("command_result 回传: request_id=" + requestId + ", command_type=" + commandType + ", ok=false, error_code=" + errorCode + ", error=" + data.getString("error"));
         }
+
         payload.put("data", data);
         webSocket.send(payload.toString());
     } catch (Exception e) {
-        log("resolve_target_result 回传失败: " + e.getMessage());
+        log("command_result 回传失败: " + e.getMessage());
     }
+}
+
+String buildCanonicalTarget(String talker) {
+    if (talker == null || talker.trim().isEmpty()) {
+        return "";
+    }
+    String normalizedTalker = talker.trim();
+    return looksLikeGroupTalker(normalizedTalker) ? "group:" + normalizedTalker : "user:" + normalizedTalker;
+}
+
+boolean isKnownGroupTalker(String talker) {
+    if (talker == null || talker.trim().isEmpty()) {
+        return false;
+    }
+    List groups = null;
+    try {
+        groups = getGroupList();
+    } catch (Exception e) {
+        log("获取群列表失败: " + e.getMessage());
+        return false;
+    }
+    if (groups == null || groups.isEmpty()) {
+        return false;
+    }
+    String normalizedTalker = normalizeNameKey(talker);
+    for (int i = 0; i < groups.size(); i++) {
+        Object item = groups.get(i);
+        if (item == null) {
+            continue;
+        }
+        String roomId = normalizeNameKey(nullSafeInvokeString(item, "getRoomId"));
+        if (!roomId.isEmpty() && roomId.equals(normalizedTalker)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+String resolveDirectSendStatus(String wxid) {
+    if (wxid == null || wxid.trim().isEmpty()) {
+        return "unknown";
+    }
+    if (!isFriendWxid(wxid)) {
+        return "not_friend";
+    }
+    if (ALLOW_FROM.size() > 0 && !ALLOW_FROM.contains(normalizeId(wxid))) {
+        return "blocked_by_allow_from";
+    }
+    return "sendable";
+}
+
+String resolveDirectSendStatusReason(String wxid, String sendStatus) {
+    if ("not_friend".equals(sendStatus)) {
+        return "target is not a friend of the connected account";
+    }
+    if ("blocked_by_allow_from".equals(sendStatus)) {
+        return "target is not in allowFrom";
+    }
+    return "";
+}
+
+String resolveGroupSendStatus(String talker) {
+    if (talker == null || talker.trim().isEmpty()) {
+        return "unknown";
+    }
+    return isKnownGroupTalker(talker) ? "sendable" : "invalid_group";
+}
+
+String resolveGroupSendStatusReason(String talker, String sendStatus) {
+    if ("invalid_group".equals(sendStatus)) {
+        return "group talker is not available on the connected account";
+    }
+    return "";
 }
 
 boolean isDirectTargetSendable(String wxid) {
     if (wxid == null || wxid.trim().isEmpty()) {
         return false;
     }
-    if (!isFriendWxid(wxid)) {
-        return false;
-    }
-    return ALLOW_FROM.size() == 0 || ALLOW_FROM.contains(normalizeId(wxid));
+    return "sendable".equals(resolveDirectSendStatus(wxid));
 }
 
 JSONObject buildFriendSummary(Object item) {
@@ -1875,20 +1965,292 @@ JSONObject buildGroupSummary(Object item) {
     return group;
 }
 
-JSONObject buildSearchTargetResult(String rawTarget) {
-    String resolvedTalker = resolveOutboundTalker(rawTarget);
-    if (resolvedTalker == null || resolvedTalker.trim().isEmpty()) {
+JSONObject buildLookupDirectCandidate(String wxid, String remark, String nickname, String alias, String matchedBy, int score) {
+    if (wxid == null || wxid.trim().isEmpty()) {
         return null;
     }
-    boolean isGroupTalker = resolvedTalker.endsWith("@chatroom");
-    JSONObject result = new JSONObject();
-    result.put("talker", resolvedTalker);
-    result.put("target_kind", isGroupTalker ? "group" : "direct");
-    result.put("sendable", isGroupTalker ? true : isDirectTargetSendable(resolvedTalker));
-    String displayName = isGroupTalker ? getGroupNameByTalker(resolvedTalker) : getFriendDisplayName(resolvedTalker);
-    if (displayName != null && !displayName.trim().isEmpty()) {
-        result.put("display_name", displayName.trim());
+    String normalizedWxid = wxid.trim();
+    JSONObject candidate = new JSONObject();
+    candidate.put("canonical_target", buildCanonicalTarget(normalizedWxid));
+    candidate.put("talker", normalizedWxid);
+    candidate.put("target_kind", "direct");
+
+    String displayName = normalizedWxid;
+    if (remark != null && !remark.trim().isEmpty()) {
+        displayName = remark.trim();
+        candidate.put("remark", displayName);
     }
+    if (nickname != null && !nickname.trim().isEmpty()) {
+        candidate.put("nickname", nickname.trim());
+        if (displayName.equals(normalizedWxid)) {
+            displayName = nickname.trim();
+        }
+    }
+    if (alias != null && !alias.trim().isEmpty()) {
+        candidate.put("alias", alias.trim());
+        if (displayName.equals(normalizedWxid) && (nickname == null || nickname.trim().isEmpty())) {
+            displayName = alias.trim();
+        }
+    }
+
+    candidate.put("display_name", displayName);
+    candidate.put("matched_by", matchedBy == null || matchedBy.trim().isEmpty() ? "unknown" : matchedBy.trim());
+    candidate.put("score", score);
+
+    String sendStatus = resolveDirectSendStatus(normalizedWxid);
+    candidate.put("send_status", sendStatus);
+    String sendStatusReason = resolveDirectSendStatusReason(normalizedWxid, sendStatus);
+    if (!sendStatusReason.isEmpty()) {
+        candidate.put("send_status_reason", sendStatusReason);
+    }
+    return candidate;
+}
+
+JSONObject buildLookupGroupCandidate(String talker, String groupName, String matchedBy, int score) {
+    if (talker == null || talker.trim().isEmpty()) {
+        return null;
+    }
+    String normalizedTalker = talker.trim();
+    JSONObject candidate = new JSONObject();
+    candidate.put("canonical_target", buildCanonicalTarget(normalizedTalker));
+    candidate.put("talker", normalizedTalker);
+    candidate.put("target_kind", "group");
+
+    String displayName = normalizedTalker;
+    if (groupName != null && !groupName.trim().isEmpty()) {
+        displayName = groupName.trim();
+        candidate.put("group_name", groupName.trim());
+    }
+    candidate.put("display_name", displayName);
+    candidate.put("matched_by", matchedBy == null || matchedBy.trim().isEmpty() ? "unknown" : matchedBy.trim());
+    candidate.put("score", score);
+
+    String sendStatus = resolveGroupSendStatus(normalizedTalker);
+    candidate.put("send_status", sendStatus);
+    String sendStatusReason = resolveGroupSendStatusReason(normalizedTalker, sendStatus);
+    if (!sendStatusReason.isEmpty()) {
+        candidate.put("send_status_reason", sendStatusReason);
+    }
+    return candidate;
+}
+
+void upsertLookupCandidate(java.util.Map candidatesByCanonical, JSONObject candidate) {
+    if (candidatesByCanonical == null || candidate == null) {
+        return;
+    }
+    String canonicalTarget = candidate.getString("canonical_target");
+    if (canonicalTarget == null || canonicalTarget.trim().isEmpty()) {
+        return;
+    }
+    String key = canonicalTarget.trim().toLowerCase();
+    JSONObject existing = (JSONObject) candidatesByCanonical.get(key);
+    if (existing == null) {
+        candidatesByCanonical.put(key, candidate);
+        return;
+    }
+
+    int existingScore = existing.getIntValue("score");
+    int nextScore = candidate.getIntValue("score");
+    if (nextScore > existingScore) {
+        candidatesByCanonical.put(key, candidate);
+    }
+}
+
+int parseLookupLimit(Object rawLimit) {
+    int limit = 20;
+    try {
+        if (rawLimit instanceof Number) {
+            limit = ((Number) rawLimit).intValue();
+        } else if (rawLimit != null) {
+            String rawText = String.valueOf(rawLimit).trim();
+            if (!rawText.isEmpty()) {
+                limit = Integer.parseInt(rawText);
+            }
+        }
+    } catch (Exception ignore) {}
+
+    if (limit <= 0) {
+        return 20;
+    }
+    if (limit > 50) {
+        return 50;
+    }
+    return limit;
+}
+
+String normalizeLookupKind(String rawKind) {
+    if ("user".equals(rawKind) || "group".equals(rawKind)) {
+        return rawKind;
+    }
+    return "all";
+}
+
+JSONObject buildLookupTargetsResult(String rawQuery, String rawKind, int limit) {
+    String query = normalizeTargetText(rawQuery).trim();
+    String kind = normalizeLookupKind(rawKind);
+    java.util.Map candidatesByCanonical = new java.util.LinkedHashMap();
+
+    String exactUserTalker = null;
+    String exactGroupTalker = null;
+    if (startsWithIgnoreCase(query, "user:") || startsWithIgnoreCase(query, "direct:") || startsWithIgnoreCase(query, "friend:")) {
+        exactUserTalker = query.substring(query.indexOf(":") + 1).trim();
+    } else if (startsWithIgnoreCase(query, "group:") || startsWithIgnoreCase(query, "room:") || startsWithIgnoreCase(query, "chatroom:")) {
+        exactGroupTalker = query.substring(query.indexOf(":") + 1).trim();
+    }
+
+    String searchKey = normalizeNameKey(query);
+
+    if (!"group".equals(kind)) {
+        List friends = getFriendList();
+        if (friends != null) {
+            for (int i = 0; i < friends.size(); i++) {
+                Object item = friends.get(i);
+                if (item == null) {
+                    continue;
+                }
+                String wxid = nullSafeInvokeString(item, "getWxid");
+                if (wxid == null || wxid.trim().isEmpty()) {
+                    continue;
+                }
+                String remark = nullSafeInvokeString(item, "getRemark");
+                String nickname = nullSafeInvokeString(item, "getNickname");
+                String alias = nullSafeInvokeString(item, "getAlias");
+
+                String matchedBy = null;
+                int score = 0;
+                if (exactUserTalker != null && !exactUserTalker.isEmpty()) {
+                    if (normalizeNameKey(wxid).equals(normalizeNameKey(exactUserTalker))) {
+                        matchedBy = "canonical_exact";
+                        score = 200;
+                    }
+                } else if (!searchKey.isEmpty()) {
+                    String wxidKey = normalizeNameKey(wxid);
+                    String remarkKey = normalizeNameKey(remark);
+                    String nicknameKey = normalizeNameKey(nickname);
+                    String aliasKey = normalizeNameKey(alias);
+
+                    if (!remarkKey.isEmpty() && remarkKey.equals(searchKey)) {
+                        matchedBy = "remark_exact";
+                        score = 120;
+                    } else if (!nicknameKey.isEmpty() && nicknameKey.equals(searchKey)) {
+                        matchedBy = "nickname_exact";
+                        score = 110;
+                    } else if (!aliasKey.isEmpty() && aliasKey.equals(searchKey)) {
+                        matchedBy = "alias_exact";
+                        score = 105;
+                    } else if (!wxidKey.isEmpty() && wxidKey.equals(searchKey)) {
+                        matchedBy = "wxid_exact";
+                        score = 100;
+                    } else if (!remarkKey.isEmpty() && remarkKey.indexOf(searchKey) >= 0) {
+                        matchedBy = "remark_fuzzy";
+                        score = 80;
+                    } else if (!nicknameKey.isEmpty() && nicknameKey.indexOf(searchKey) >= 0) {
+                        matchedBy = "nickname_fuzzy";
+                        score = 70;
+                    } else if (!aliasKey.isEmpty() && aliasKey.indexOf(searchKey) >= 0) {
+                        matchedBy = "alias_fuzzy";
+                        score = 65;
+                    } else if (!wxidKey.isEmpty() && wxidKey.indexOf(searchKey) >= 0) {
+                        matchedBy = "wxid_fuzzy";
+                        score = 60;
+                    }
+                }
+
+                if (matchedBy == null) {
+                    continue;
+                }
+                upsertLookupCandidate(candidatesByCanonical, buildLookupDirectCandidate(wxid, remark, nickname, alias, matchedBy, score));
+            }
+        }
+
+        if (exactUserTalker != null && !exactUserTalker.isEmpty()) {
+            String canonicalKey = buildCanonicalTarget(exactUserTalker).toLowerCase();
+            if (!candidatesByCanonical.containsKey(canonicalKey)) {
+                upsertLookupCandidate(candidatesByCanonical, buildLookupDirectCandidate(exactUserTalker, "", "", "", "canonical_exact", 200));
+            }
+        }
+    }
+
+    if (!"user".equals(kind)) {
+        List groups = getGroupList();
+        if (groups != null) {
+            for (int i = 0; i < groups.size(); i++) {
+                Object item = groups.get(i);
+                if (item == null) {
+                    continue;
+                }
+                String talker = nullSafeInvokeString(item, "getRoomId");
+                if (talker == null || talker.trim().isEmpty()) {
+                    continue;
+                }
+                String groupName = nullSafeInvokeString(item, "getName");
+
+                String matchedBy = null;
+                int score = 0;
+                if (exactGroupTalker != null && !exactGroupTalker.isEmpty()) {
+                    if (normalizeNameKey(talker).equals(normalizeNameKey(exactGroupTalker))) {
+                        matchedBy = "canonical_exact";
+                        score = 200;
+                    }
+                } else if (!searchKey.isEmpty()) {
+                    String talkerKey = normalizeNameKey(talker);
+                    String groupNameKey = normalizeNameKey(groupName);
+
+                    if (!groupNameKey.isEmpty() && groupNameKey.equals(searchKey)) {
+                        matchedBy = "group_name_exact";
+                        score = 120;
+                    } else if (!talkerKey.isEmpty() && talkerKey.equals(searchKey)) {
+                        matchedBy = "group_id_exact";
+                        score = 110;
+                    } else if (!groupNameKey.isEmpty() && groupNameKey.indexOf(searchKey) >= 0) {
+                        matchedBy = "group_name_fuzzy";
+                        score = 80;
+                    } else if (!talkerKey.isEmpty() && talkerKey.indexOf(searchKey) >= 0) {
+                        matchedBy = "group_id_fuzzy";
+                        score = 70;
+                    }
+                }
+
+                if (matchedBy == null) {
+                    continue;
+                }
+                upsertLookupCandidate(candidatesByCanonical, buildLookupGroupCandidate(talker, groupName, matchedBy, score));
+            }
+        }
+
+        if (exactGroupTalker != null && !exactGroupTalker.isEmpty()) {
+            String canonicalKey = buildCanonicalTarget(exactGroupTalker).toLowerCase();
+            if (!candidatesByCanonical.containsKey(canonicalKey)) {
+                upsertLookupCandidate(candidatesByCanonical, buildLookupGroupCandidate(exactGroupTalker, "", "canonical_exact", 200));
+            }
+        }
+    }
+
+    java.util.List candidateList = new java.util.ArrayList(candidatesByCanonical.values());
+    java.util.Collections.sort(candidateList, new java.util.Comparator() {
+        public int compare(Object leftObj, Object rightObj) {
+            JSONObject left = (JSONObject) leftObj;
+            JSONObject right = (JSONObject) rightObj;
+            int scoreCompare = right.getIntValue("score") - left.getIntValue("score");
+            if (scoreCompare != 0) {
+                return scoreCompare;
+            }
+            String leftName = normalizeNameKey(left.getString("display_name"));
+            String rightName = normalizeNameKey(right.getString("display_name"));
+            return leftName.compareTo(rightName);
+        }
+    });
+
+    JSONArray candidates = new JSONArray();
+    for (int i = 0; i < candidateList.size() && i < limit; i++) {
+        candidates.add(candidateList.get(i));
+    }
+
+    JSONObject result = new JSONObject();
+    result.put("query", rawQuery == null ? "" : rawQuery.trim());
+    result.put("kind", kind);
+    result.put("count", candidates.size());
+    result.put("candidates", candidates);
     return result;
 }
 
@@ -1900,18 +2262,17 @@ void sendCapabilities() {
         JSONObject payload = new JSONObject();
         payload.put("type", "capabilities");
         JSONObject data = new JSONObject();
-        data.put("protocol_version", "wap-vnext-2026-03-23");
+        data.put("protocol_version", "wap-vnext-2026-03-24");
         data.put("client_name", "openclaw-channel-wap");
-        data.put("client_version", "4.0.0");
+        data.put("client_version", "5.0.0");
 
         JSONArray rpcMethods = new JSONArray();
         rpcMethods.add("get_friends");
         rpcMethods.add("get_groups");
-        rpcMethods.add("search_target");
+        rpcMethods.add("lookup_targets");
         data.put("rpc_methods", rpcMethods);
 
         JSONArray commandTypes = new JSONArray();
-        commandTypes.add("resolve_target");
         commandTypes.add("send_text");
         commandTypes.add("send_image");
         commandTypes.add("send_file");
@@ -1920,6 +2281,8 @@ void sendCapabilities() {
         JSONArray features = new JSONArray();
         features.add("capabilities");
         features.add("rpc");
+        features.add("lookup_targets");
+        features.add("command_result");
         features.add("group_mentions");
         features.add("local_media_cache");
         features.add("quote_reply");
@@ -1965,7 +2328,7 @@ void handleServerMessage(String text) {
     try {
         JSONObject msg = JSON.parseObject(text);
         String type = msg.getString("type");
-        if ("resolve_target".equals(type) || "rpc_request".equals(type) || "send_text".equals(type) || "send_image".equals(type) || "send_file".equals(type)) {
+        if ("rpc_request".equals(type) || "send_text".equals(type) || "send_image".equals(type) || "send_file".equals(type) || "send_voice".equals(type)) {
             log("收到服务端指令 type=" + type);
         }
 
@@ -2167,50 +2530,24 @@ void handleServerMessage(String text) {
                 return;
             }
 
-            if ("search_target".equals(method)) {
-                String target = params.getString("target");
-                if (target == null || target.trim().isEmpty()) {
-                    sendRpcResult(requestId, method, null, "target is required");
+            if ("lookup_targets".equals(method)) {
+                String query = params.getString("query");
+                String kind = params.getString("kind");
+                int limit = parseLookupLimit(params.get("limit"));
+                if (query == null || query.trim().isEmpty()) {
+                    sendRpcResult(requestId, method, null, "query is required");
                     return;
                 }
-                JSONObject result = buildSearchTargetResult(target);
-                if (result == null) {
-                    sendRpcResult(requestId, method, null, "target resolve failed");
-                    return;
+                try {
+                    JSONObject result = buildLookupTargetsResult(query, kind, limit);
+                    sendRpcResult(requestId, method, result, null);
+                } catch (Exception e) {
+                    sendRpcResult(requestId, method, null, "lookup_targets failed: " + e.getMessage());
                 }
-                sendRpcResult(requestId, method, result, null);
                 return;
             }
 
             sendRpcResult(requestId, method, null, "unsupported method: " + method);
-            return;
-        }
-
-        // 仅解析目标，不发送消息（供服务端在发送前构造稳定 session）
-        if ("resolve_target".equals(type)) {
-            JSONObject data = msg.getJSONObject("data");
-            if (data == null) {
-                log("resolve_target 指令缺少 data");
-                return;
-            }
-            String requestId = data.getString("request_id");
-            String target = data.getString("target");
-            log("resolve_target 开始 request_id=" + requestId + ", target=" + target);
-            if (requestId == null || requestId.trim().isEmpty()) {
-                log("resolve_target 指令缺少 request_id");
-                return;
-            }
-            if (target == null || target.trim().isEmpty()) {
-                sendResolveTargetResult(requestId, target, null, "unknown", "target is required");
-                return;
-            }
-            String resolvedTalker = resolveAndValidateOutboundTalker(target, "resolve_target");
-            if (resolvedTalker == null) {
-                sendResolveTargetResult(requestId, target, null, "unknown", "target resolve failed");
-                return;
-            }
-            String targetKind = resolvedTalker.endsWith("@chatroom") ? "group" : "direct";
-            sendResolveTargetResult(requestId, target, resolvedTalker, targetKind, null);
             return;
         }
 
@@ -2221,44 +2558,60 @@ void handleServerMessage(String text) {
                 log("send_text 指令缺少 data");
                 return;
             }
+            String requestId = data.getString("request_id");
             String talker = data.getString("talker");
             String content = data.getString("content");
             long replyToMsgId = parseOptionalLong(data.get("reply_to_msg_id"));
 
             if (talker == null || content == null) {
                 log("send_text 指令缺少必要参数");
+                sendCommandResult(requestId, "send_text", null, "send_failed", "talker and content are required");
                 return;
             }
 
-            String canonicalTalker = validateCanonicalOutboundTalker(talker, "send_text");
-            if (canonicalTalker == null) {
+            JSONObject validation = validateCanonicalOutboundTarget(talker, "send_text");
+            if (!validation.getBooleanValue("ok")) {
+                sendCommandResult(requestId, "send_text", null, validation.getString("error_code"), validation.getString("error"));
                 return;
             }
+            String canonicalTalker = validation.getString("talker");
             if (!checkAndIncreaseSendRateLimit()) {
+                sendCommandResult(requestId, "send_text", null, "rate_limited", "send rate limit exceeded");
                 return;
             }
 
-            boolean isGroupTalker = canonicalTalker.endsWith("@chatroom");
-            String outboundContent = isGroupTalker
-                ? renderGroupMentionTemplates(canonicalTalker, content)
-                : content;
-            boolean sentAsQuote = false;
-            if (replyToMsgId > 0L) {
-                try {
-                    sendQuoteMsg(canonicalTalker, replyToMsgId, outboundContent);
-                    sentAsQuote = true;
-                } catch (Exception e) {
-                    log("引用回复发送失败，回退普通文本: " + e.getMessage());
+            try {
+                boolean isGroupTalker = canonicalTalker.endsWith("@chatroom");
+                String outboundContent = isGroupTalker
+                    ? renderGroupMentionTemplates(canonicalTalker, content)
+                    : content;
+                boolean sentAsQuote = false;
+                if (replyToMsgId > 0L) {
+                    try {
+                        sendQuoteMsg(canonicalTalker, replyToMsgId, outboundContent);
+                        sentAsQuote = true;
+                    } catch (Exception e) {
+                        log("引用回复发送失败，回退普通文本: " + e.getMessage());
+                        sendText(canonicalTalker, outboundContent);
+                    }
+                } else {
                     sendText(canonicalTalker, outboundContent);
                 }
-            } else {
-                sendText(canonicalTalker, outboundContent);
+                String preview = outboundContent;
+                if (preview.length() > 30) {
+                    preview = preview.substring(0, 30) + "...";
+                }
+                log("已发送消息到 " + canonicalTalker + (sentAsQuote ? " [quote]" : "") + ": " + preview);
+
+                JSONObject result = new JSONObject();
+                result.put("talker", canonicalTalker);
+                result.put("sent_as_quote", sentAsQuote);
+                result.put("preview", preview);
+                sendCommandResult(requestId, "send_text", result, null, null);
+            } catch (Exception e) {
+                log("send_text 发送失败: " + e.getMessage());
+                sendCommandResult(requestId, "send_text", null, "send_failed", "send_text failed: " + e.getMessage());
             }
-            String preview = outboundContent;
-            if (preview.length() > 30) {
-                preview = preview.substring(0, 30) + "...";
-            }
-            log("已发送消息到 " + canonicalTalker + (sentAsQuote ? " [quote]" : "") + ": " + preview);
             return;
         }
 
@@ -2268,6 +2621,7 @@ void handleServerMessage(String text) {
                 log("send_image 指令缺少 data");
                 return;
             }
+            String requestId = data.getString("request_id");
             String talker = data.getString("talker");
             String imageUrl = data.getString("image_url");
             String imageId = data.getString("image_id");
@@ -2278,32 +2632,54 @@ void handleServerMessage(String text) {
             }
             if (talker == null || imageUrl == null || imageUrl.trim().isEmpty()) {
                 log("send_image 指令缺少必要参数");
+                sendCommandResult(requestId, "send_image", null, "send_failed", "talker and image_url are required");
                 return;
             }
             if (!isHttpUrl(imageUrl)) {
                 log("send_image 仅支持 http(s) URL: " + imageUrl);
+                sendCommandResult(requestId, "send_image", null, "send_failed", "send_image requires http(s) image_url");
                 return;
             }
-            String canonicalTalker = validateCanonicalOutboundTalker(talker, "send_image");
-            if (canonicalTalker == null) {
+
+            JSONObject validation = validateCanonicalOutboundTarget(talker, "send_image");
+            if (!validation.getBooleanValue("ok")) {
+                sendCommandResult(requestId, "send_image", null, validation.getString("error_code"), validation.getString("error"));
                 return;
             }
+            String canonicalTalker = validation.getString("talker");
             if (!checkAndIncreaseSendRateLimit()) {
+                sendCommandResult(requestId, "send_image", null, "rate_limited", "send rate limit exceeded");
                 return;
             }
+
             File imageFile = downloadRemoteFile(imageUrl, "wap_image.jpg");
             if (imageFile == null || !imageFile.exists()) {
                 log("send_image 下载失败: " + imageUrl);
+                sendCommandResult(requestId, "send_image", null, "send_failed", "failed to download image");
                 return;
             }
-            sendImage(canonicalTalker, imageFile.getAbsolutePath());
-            if (caption != null && !caption.trim().isEmpty()) {
-                String outboundCaption = canonicalTalker.endsWith("@chatroom")
-                    ? renderGroupMentionTemplates(canonicalTalker, caption)
-                    : caption;
-                sendText(canonicalTalker, outboundCaption);
+
+            try {
+                sendImage(canonicalTalker, imageFile.getAbsolutePath());
+                boolean captionSent = false;
+                if (caption != null && !caption.trim().isEmpty()) {
+                    String outboundCaption = canonicalTalker.endsWith("@chatroom")
+                        ? renderGroupMentionTemplates(canonicalTalker, caption)
+                        : caption;
+                    sendText(canonicalTalker, outboundCaption);
+                    captionSent = true;
+                }
+                log("已发送图片到 " + canonicalTalker + ": " + imageFile.getName());
+
+                JSONObject result = new JSONObject();
+                result.put("talker", canonicalTalker);
+                result.put("local_file", imageFile.getName());
+                result.put("caption_sent", captionSent);
+                sendCommandResult(requestId, "send_image", result, null, null);
+            } catch (Exception e) {
+                log("send_image 发送失败: " + e.getMessage());
+                sendCommandResult(requestId, "send_image", null, "send_failed", "send_image failed: " + e.getMessage());
             }
-            log("已发送图片到 " + canonicalTalker + ": " + imageFile.getName());
             return;
         }
 
@@ -2313,6 +2689,7 @@ void handleServerMessage(String text) {
                 log("send_file 指令缺少 data");
                 return;
             }
+            String requestId = data.getString("request_id");
             String talker = data.getString("talker");
             String fileUrl = data.getString("file_url");
             String fileId = data.getString("file_id");
@@ -2324,39 +2701,64 @@ void handleServerMessage(String text) {
             }
             if (talker == null || fileUrl == null || fileUrl.trim().isEmpty()) {
                 log("send_file 指令缺少必要参数");
+                sendCommandResult(requestId, "send_file", null, "send_failed", "talker and file_url are required");
                 return;
             }
             if (!isHttpUrl(fileUrl)) {
                 log("send_file 仅支持 http(s) URL: " + fileUrl);
+                sendCommandResult(requestId, "send_file", null, "send_failed", "send_file requires http(s) file_url");
                 return;
             }
-            String canonicalTalker = validateCanonicalOutboundTalker(talker, "send_file");
-            if (canonicalTalker == null) {
+
+            JSONObject validation = validateCanonicalOutboundTarget(talker, "send_file");
+            if (!validation.getBooleanValue("ok")) {
+                sendCommandResult(requestId, "send_file", null, validation.getString("error_code"), validation.getString("error"));
                 return;
             }
+            String canonicalTalker = validation.getString("talker");
             if (!checkAndIncreaseSendRateLimit()) {
+                sendCommandResult(requestId, "send_file", null, "rate_limited", "send rate limit exceeded");
                 return;
             }
+
             String title = sanitizeFileName(fileName, extractFileNameFromUrl(fileUrl));
             File localFile = downloadRemoteFile(fileUrl, title);
             if (localFile == null || !localFile.exists()) {
                 log("send_file 下载/落地失败: " + fileUrl);
+                sendCommandResult(requestId, "send_file", null, "send_failed", "failed to download file");
                 return;
             }
-            shareFile(canonicalTalker, title, localFile.getAbsolutePath(), "");
-            if (caption != null && !caption.trim().isEmpty()) {
-                String outboundCaption = canonicalTalker.endsWith("@chatroom")
-                    ? renderGroupMentionTemplates(canonicalTalker, caption)
-                    : caption;
-                sendText(canonicalTalker, outboundCaption);
+
+            try {
+                shareFile(canonicalTalker, title, localFile.getAbsolutePath(), "");
+                boolean captionSent = false;
+                if (caption != null && !caption.trim().isEmpty()) {
+                    String outboundCaption = canonicalTalker.endsWith("@chatroom")
+                        ? renderGroupMentionTemplates(canonicalTalker, caption)
+                        : caption;
+                    sendText(canonicalTalker, outboundCaption);
+                    captionSent = true;
+                }
+                log("已发送文件到 " + canonicalTalker + ": " + localFile.getName());
+
+                JSONObject result = new JSONObject();
+                result.put("talker", canonicalTalker);
+                result.put("file_name", title);
+                result.put("caption_sent", captionSent);
+                sendCommandResult(requestId, "send_file", result, null, null);
+            } catch (Exception e) {
+                log("send_file 发送失败: " + e.getMessage());
+                sendCommandResult(requestId, "send_file", null, "send_failed", "send_file failed: " + e.getMessage());
             }
-            log("已发送文件到 " + canonicalTalker + ": " + localFile.getName());
             return;
         }
 
         // 预留：发送语音消息
         if ("send_voice".equals(type)) {
+            JSONObject data = msg.getJSONObject("data");
+            String requestId = data == null ? null : data.getString("request_id");
             log("语音消息暂不支持，请等待后续版本");
+            sendCommandResult(requestId, "send_voice", null, "send_failed", "send_voice is not supported yet");
             return;
         }
 
