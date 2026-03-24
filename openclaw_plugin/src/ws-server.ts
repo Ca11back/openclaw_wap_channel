@@ -32,14 +32,17 @@ import {
   type WapAccount,
 } from "./config.js";
 import type {
+  WapCommandResultPayload,
   WapCapabilitiesPayload,
   WapClientCapabilities,
   WapDownstreamCommand,
   WapMessageData,
   WapRpcRequestCommand,
   WapRpcResultPayload,
-  WapResolveTargetResultPayload,
+  WapSendFileCommand,
+  WapSendImageCommand,
   WapSendTextCommand,
+  WapSendVoiceCommand,
   WapUpstreamMessage,
 } from "./protocol.js";
 import { resolveReplyMediaUrls } from "./reply-media.js";
@@ -67,8 +70,8 @@ const MAX_MESSAGE_SIZE = 64 * 1024;
 const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX_MESSAGES = 10;
 const TEMP_FILE_TTL_MS = 10 * 60 * 1000;
-const TARGET_RESOLVE_TIMEOUT_MS = 5000;
 const RPC_TIMEOUT_MS = 5000;
+const COMMAND_TIMEOUT_MS = 5000;
 
 type TempFileEntry = {
   accountId: string;
@@ -185,16 +188,6 @@ type PendingGroupHistoryEntry = {
 
 const pendingGroupHistories = new Map<string, PendingGroupHistoryEntry[]>();
 
-type PendingTargetResolve = {
-  clientId: string;
-  accountId: string;
-  target: string;
-  resolve: (result: { ok: true; talker: string; kind: "direct" | "group" | "unknown" } | { ok: false; error: string }) => void;
-  timeout: ReturnType<typeof setTimeout>;
-};
-
-const pendingTargetResolves = new Map<string, PendingTargetResolve>();
-
 type PendingRpcRequest = {
   clientId: string;
   accountId: string;
@@ -204,6 +197,18 @@ type PendingRpcRequest = {
 };
 
 const pendingRpcRequests = new Map<string, PendingRpcRequest>();
+
+type WapAckableCommand = WapSendTextCommand | WapSendImageCommand | WapSendFileCommand | WapSendVoiceCommand;
+
+type PendingCommandRequest = {
+  clientId: string;
+  accountId: string;
+  commandType: WapAckableCommand["type"];
+  resolve: (result: { ok: true; result: unknown } | { ok: false; error: string; errorCode?: string }) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+const pendingCommandRequests = new Map<string, PendingCommandRequest>();
 
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -398,15 +403,15 @@ export function stopWsService() {
     wss.close();
     wss = null;
   }
-  for (const [requestId, pending] of pendingTargetResolves.entries()) {
-    clearTimeout(pending.timeout);
-    pending.resolve({ ok: false, error: "WAP connection closed before target resolve completed" });
-    pendingTargetResolves.delete(requestId);
-  }
   for (const [requestId, pending] of pendingRpcRequests.entries()) {
     clearTimeout(pending.timeout);
     pending.resolve({ ok: false, error: "WAP connection closed before RPC completed" });
     pendingRpcRequests.delete(requestId);
+  }
+  for (const [requestId, pending] of pendingCommandRequests.entries()) {
+    clearTimeout(pending.timeout);
+    pending.resolve({ ok: false, error: "WAP connection closed before command completed" });
+    pendingCommandRequests.delete(requestId);
   }
   clients.clear();
   tempFiles.clear();
@@ -505,20 +510,6 @@ function resolveOpenClient(accountId: string): [string, ClientInfo] | null {
   return null;
 }
 
-function settlePendingTargetResolve(
-  requestId: string,
-  result: { ok: true; talker: string; kind: "direct" | "group" | "unknown" } | { ok: false; error: string },
-): boolean {
-  const pending = pendingTargetResolves.get(requestId);
-  if (!pending) {
-    return false;
-  }
-  clearTimeout(pending.timeout);
-  pendingTargetResolves.delete(requestId);
-  pending.resolve(result);
-  return true;
-}
-
 function settlePendingRpcRequest(
   requestId: string,
   result: { ok: true; result: unknown } | { ok: false; error: string },
@@ -529,6 +520,20 @@ function settlePendingRpcRequest(
   }
   clearTimeout(pending.timeout);
   pendingRpcRequests.delete(requestId);
+  pending.resolve(result);
+  return true;
+}
+
+function settlePendingCommandRequest(
+  requestId: string,
+  result: { ok: true; result: unknown } | { ok: false; error: string; errorCode?: string },
+): boolean {
+  const pending = pendingCommandRequests.get(requestId);
+  if (!pending) {
+    return false;
+  }
+  clearTimeout(pending.timeout);
+  pendingCommandRequests.delete(requestId);
   pending.resolve(result);
   return true;
 }
@@ -587,38 +592,41 @@ function handleRpcResult(clientId: string, msg: WapRpcResultPayload, api: OpenCl
   settlePendingRpcRequest(requestId, { ok: false, error });
 }
 
-function handleResolveTargetResult(clientId: string, msg: WapResolveTargetResultPayload, api: OpenClawPluginApi) {
-  const requestId =
-    typeof msg.data?.request_id === "string"
-      ? msg.data.request_id.trim()
-      : "";
-  if (!requestId) {
-    api.logger.warn(`WAP resolve_target_result missing request_id from ${clientId}`);
+function handleCommandResult(clientId: string, msg: WapCommandResultPayload, api: OpenClawPluginApi) {
+  const requestId = typeof msg.data?.request_id === "string" ? msg.data.request_id.trim() : "";
+  const commandType = typeof msg.data?.command_type === "string" ? msg.data.command_type.trim() : "";
+  if (!requestId || !commandType) {
+    api.logger.warn(`WAP command_result missing request_id/command_type from ${clientId}`);
     return;
   }
-  const pending = pendingTargetResolves.get(requestId);
+  const pending = pendingCommandRequests.get(requestId);
   if (!pending) {
-    api.logger.debug(`WAP resolve_target_result for unknown request ${requestId} from ${clientId}`);
+    api.logger.debug(`WAP command_result for unknown request ${requestId} from ${clientId}`);
     return;
   }
   if (pending.clientId !== clientId) {
     api.logger.warn(
-      `WAP resolve_target_result request ${requestId} received from unexpected client ${clientId}; expected ${pending.clientId}`,
+      `WAP command_result request ${requestId} received from unexpected client ${clientId}; expected ${pending.clientId}`,
     );
     return;
   }
-  const kind = msg.data.target_kind ?? "unknown";
-  if (msg.data.ok) {
-    const talker = normalizeWapMessagingTarget(msg.data.resolved_talker ?? "");
-    if (!talker) {
-      settlePendingTargetResolve(requestId, { ok: false, error: "WAP resolved target is empty" });
-      return;
-    }
-    settlePendingTargetResolve(requestId, { ok: true, talker, kind });
+  if (pending.commandType !== commandType) {
+    api.logger.warn(
+      `WAP command_result request ${requestId} command mismatch from ${clientId}; expected ${pending.commandType}, got ${commandType}`,
+    );
     return;
   }
-  const error = msg.data.error?.trim() || `WAP failed to resolve target ${pending.target}`;
-  settlePendingTargetResolve(requestId, { ok: false, error });
+  if (msg.data.ok) {
+    settlePendingCommandRequest(requestId, { ok: true, result: msg.data.result });
+    return;
+  }
+  const error = typeof msg.data.error === "string" && msg.data.error.trim()
+    ? msg.data.error.trim()
+    : `WAP command failed: ${commandType}`;
+  const errorCode = typeof msg.data.error_code === "string" && msg.data.error_code.trim()
+    ? msg.data.error_code.trim()
+    : undefined;
+  settlePendingCommandRequest(requestId, { ok: false, error, errorCode });
 }
 
 async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, api: OpenClawPluginApi) {
@@ -820,8 +828,8 @@ async function handleMessage(
       handleRpcResult(clientId, msg, api);
       return;
     }
-    if (msg.type === "resolve_target_result") {
-      handleResolveTargetResult(clientId, msg, api);
+    if (msg.type === "command_result") {
+      handleCommandResult(clientId, msg, api);
       return;
     }
 
@@ -1263,7 +1271,7 @@ function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
     };
   }
 
-  if (obj.type === "resolve_target_result") {
+  if (obj.type === "command_result") {
     const resultData = obj.data;
     if (typeof resultData !== "object" || resultData === null) {
       return null;
@@ -1271,23 +1279,29 @@ function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
     const d = resultData as Record<string, unknown>;
     if (
       typeof d.request_id !== "string" ||
-      typeof d.target !== "string" ||
+      typeof d.command_type !== "string" ||
       typeof d.ok !== "boolean"
     ) {
       return null;
     }
-    const targetKindRaw = typeof d.target_kind === "string" ? d.target_kind : "unknown";
-    const targetKind: "direct" | "group" | "unknown" =
-      targetKindRaw === "direct" || targetKindRaw === "group" ? targetKindRaw : "unknown";
+    const commandTypeRaw = d.command_type;
+    if (
+      commandTypeRaw !== "send_text" &&
+      commandTypeRaw !== "send_image" &&
+      commandTypeRaw !== "send_file" &&
+      commandTypeRaw !== "send_voice"
+    ) {
+      return null;
+    }
     return {
-      type: "resolve_target_result",
+      type: "command_result",
       data: {
         request_id: d.request_id,
-        target: d.target,
+        command_type: commandTypeRaw,
         ok: d.ok,
-        resolved_talker: typeof d.resolved_talker === "string" ? d.resolved_talker : undefined,
-        target_kind: targetKind,
+        result: d.result,
         error: typeof d.error === "string" ? d.error : undefined,
+        error_code: typeof d.error_code === "string" ? d.error_code : undefined,
       },
     };
   }
@@ -1361,14 +1375,6 @@ function validateUpstreamMessage(data: unknown): WapUpstreamMessage | null {
 }
 
 function handleDisconnect(clientId: string, api: OpenClawPluginApi) {
-  for (const [requestId, pending] of pendingTargetResolves.entries()) {
-    if (pending.clientId !== clientId) {
-      continue;
-    }
-    clearTimeout(pending.timeout);
-    pending.resolve({ ok: false, error: "WAP client disconnected before target resolve completed" });
-    pendingTargetResolves.delete(requestId);
-  }
   for (const [requestId, pending] of pendingRpcRequests.entries()) {
     if (pending.clientId !== clientId) {
       continue;
@@ -1376,6 +1382,14 @@ function handleDisconnect(clientId: string, api: OpenClawPluginApi) {
     clearTimeout(pending.timeout);
     pending.resolve({ ok: false, error: "WAP client disconnected before RPC completed" });
     pendingRpcRequests.delete(requestId);
+  }
+  for (const [requestId, pending] of pendingCommandRequests.entries()) {
+    if (pending.clientId !== clientId) {
+      continue;
+    }
+    clearTimeout(pending.timeout);
+    pending.resolve({ ok: false, error: "WAP client disconnected before command completed" });
+    pendingCommandRequests.delete(requestId);
   }
   const client = clients.get(clientId);
   clients.delete(clientId);
@@ -1396,51 +1410,48 @@ export function sendToClient(command: WapDownstreamCommand, accountId?: string):
   return true;
 }
 
-export async function resolveTargetViaClient(params: {
-  target: string;
+export async function sendCommandToClient(params: {
+  command: WapAckableCommand;
   accountId?: string | null;
   timeoutMs?: number;
-}): Promise<{ ok: true; talker: string; kind: "direct" | "group" | "unknown" } | { ok: false; error: string }> {
-  const target = normalizeWapMessagingTarget(params.target);
-  if (!target) {
-    return { ok: false, error: "Missing WeChat target" };
-  }
+}): Promise<{ ok: true; result: unknown } | { ok: false; error: string; errorCode?: string }> {
   const accountId = (params.accountId ?? DEFAULT_ACCOUNT_ID).trim() || DEFAULT_ACCOUNT_ID;
   const resolved = resolveOpenClient(accountId);
   if (!resolved) {
-    return { ok: false, error: `No connected WAP clients for account ${accountId}` };
+    return { ok: false, error: `No connected WAP clients for account ${accountId}`, errorCode: "no_connected_client" };
   }
   const [clientId, client] = resolved;
   const requestId = randomUUID();
-  const timeoutMs = params.timeoutMs ?? TARGET_RESOLVE_TIMEOUT_MS;
+  const timeoutMs = params.timeoutMs ?? COMMAND_TIMEOUT_MS;
+  const command = {
+    ...params.command,
+    data: {
+      ...params.command.data,
+      request_id: requestId,
+    },
+  } as WapAckableCommand;
   return await new Promise((resolve) => {
     const timeout = setTimeout(() => {
-      settlePendingTargetResolve(requestId, {
+      settlePendingCommandRequest(requestId, {
         ok: false,
-        error: `WAP target resolve timeout (${timeoutMs}ms): ${target}`,
+        error: `WAP command timeout (${timeoutMs}ms): ${command.type}`,
+        errorCode: "send_failed",
       });
     }, timeoutMs);
-    pendingTargetResolves.set(requestId, {
+    pendingCommandRequests.set(requestId, {
       clientId,
       accountId,
-      target,
+      commandType: command.type,
       timeout,
       resolve,
     });
     try {
-      client.ws.send(
-        JSON.stringify({
-          type: "resolve_target",
-          data: {
-            request_id: requestId,
-            target,
-          },
-        }),
-      );
+      client.ws.send(JSON.stringify(command));
     } catch (error) {
-      settlePendingTargetResolve(requestId, {
+      settlePendingCommandRequest(requestId, {
         ok: false,
-        error: `WAP target resolve dispatch failed: ${String(error)}`,
+        error: `WAP command dispatch failed: ${String(error)}`,
+        errorCode: "send_failed",
       });
     }
   });

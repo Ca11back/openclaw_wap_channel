@@ -1,6 +1,11 @@
-import { DEFAULT_ACCOUNT_ID, normalizeWapMessagingTarget } from "./config.js";
-import { buildWapMediaCommand, callClientRpc, getClientCapabilities, getClientStats, resolveTargetViaClient, sendToClient } from "./ws-server.js";
-import type { WapSendTextCommand } from "./protocol.js";
+import {
+  DEFAULT_ACCOUNT_ID,
+  decorateWapCanonicalTarget,
+  normalizeWapMessagingTarget,
+  parseWapCanonicalTarget,
+} from "./config.js";
+import { buildWapMediaCommand, callClientRpc, getClientCapabilities, getClientStats, sendCommandToClient } from "./ws-server.js";
+import type { WapSendFileCommand, WapSendImageCommand, WapSendTextCommand } from "./protocol.js";
 
 export type WapFriendEntry = {
   wxid: string;
@@ -17,16 +22,39 @@ export type WapGroupEntry = {
   memberCount?: number;
 };
 
-export type WapResolvedTarget = {
-  input: string;
-  talker: string;
+export type WapLookupKind = "user" | "group" | "all";
+export type WapTargetKind = "direct" | "group";
+export type WapSendStatus = "sendable" | "not_friend" | "blocked_by_allow_from" | "invalid_group" | "unknown";
+export type WapSendFailureCode =
+  | "invalid_canonical_target"
+  | "target_not_found"
+  | "not_friend"
+  | "blocked_by_allow_from"
+  | "invalid_group"
+  | "no_connected_client"
+  | "rate_limited"
+  | "send_failed";
+
+export type WapLookupTargetCandidate = {
   canonicalTarget: string;
-  targetKind: "direct" | "group";
-  displayName?: string;
-  sendable?: boolean;
+  targetKind: WapTargetKind;
+  talker: string;
+  displayName: string;
+  remark?: string;
+  nickname?: string;
+  alias?: string;
+  groupName?: string;
+  matchedBy: string;
+  score: number;
+  sendStatus: WapSendStatus;
+  sendStatusReason?: string;
 };
 
-export type WapMediaToolKind = "image" | "file";
+export type WapCanonicalTarget = {
+  canonicalTarget: string;
+  talker: string;
+  targetKind: WapTargetKind;
+};
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -47,25 +75,225 @@ function normalizeAccountId(accountId?: string | null): string {
   return (accountId ?? DEFAULT_ACCOUNT_ID).trim() || DEFAULT_ACCOUNT_ID;
 }
 
-function decorateCanonicalTarget(talker: string): string {
-  return talker.endsWith("@chatroom") ? `group:${talker}` : `user:${talker}`;
-}
-
 function applyQueryAndLimit<T>(
   items: T[],
   options: { query?: string | null; limit?: number | null; keyFn: (item: T) => string[] },
 ): T[] {
   const query = options.query?.trim().toLowerCase() ?? "";
   const filtered = query
-    ? items.filter((item) =>
-        options.keyFn(item).some((key) => key.toLowerCase().includes(query)),
-      )
+    ? items.filter((item) => options.keyFn(item).some((key) => key.toLowerCase().includes(query)))
     : items;
   const limit = options.limit ?? undefined;
   if (!limit || limit <= 0) {
     return filtered;
   }
   return filtered.slice(0, limit);
+}
+
+function parseTargetKind(value: unknown, talker?: string): WapTargetKind | null {
+  if (value === "group" || value === "direct") {
+    return value;
+  }
+  if (typeof talker === "string" && talker.endsWith("@chatroom")) {
+    return "group";
+  }
+  if (typeof talker === "string" && talker.trim()) {
+    return "direct";
+  }
+  return null;
+}
+
+function parseSendStatus(value: unknown): WapSendStatus {
+  if (
+    value === "sendable" ||
+    value === "not_friend" ||
+    value === "blocked_by_allow_from" ||
+    value === "invalid_group"
+  ) {
+    return value;
+  }
+  return "unknown";
+}
+
+function parseLookupCandidate(rawEntry: unknown): WapLookupTargetCandidate | null {
+  const entry = asRecord(rawEntry);
+  if (!entry) {
+    return null;
+  }
+  const talker = asString(entry.talker) ?? asString(entry.resolved_talker);
+  const canonicalTarget =
+    asString(entry.canonical_target) ??
+    asString(entry.canonicalTarget) ??
+    (talker ? decorateWapCanonicalTarget(talker) : undefined);
+  const parsedCanonical = canonicalTarget ? parseWapCanonicalTarget(canonicalTarget) : null;
+  if (!parsedCanonical) {
+    return null;
+  }
+  const targetKind = parseTargetKind(
+    asString(entry.target_kind) ?? asString(entry.targetKind),
+    parsedCanonical.talker,
+  );
+  if (!targetKind) {
+    return null;
+  }
+  const remark = asString(entry.remark);
+  const nickname = asString(entry.nickname);
+  const alias = asString(entry.alias);
+  const groupName = asString(entry.group_name) ?? asString(entry.groupName);
+  const displayName =
+    asString(entry.display_name) ??
+    asString(entry.displayName) ??
+    groupName ??
+    remark ??
+    nickname ??
+    alias ??
+    parsedCanonical.talker;
+  return {
+    canonicalTarget: parsedCanonical.canonicalTarget,
+    targetKind,
+    talker: parsedCanonical.talker,
+    displayName,
+    remark,
+    nickname,
+    alias,
+    groupName,
+    matchedBy: asString(entry.matched_by) ?? asString(entry.matchedBy) ?? "unknown",
+    score: asNumber(entry.score) ?? 0,
+    sendStatus: parseSendStatus(asString(entry.send_status) ?? asString(entry.sendStatus)),
+    sendStatusReason: asString(entry.send_status_reason) ?? asString(entry.sendStatusReason),
+  };
+}
+
+function findLookupCandidateByCanonicalTarget(
+  candidates: WapLookupTargetCandidate[],
+  canonicalTarget: string,
+): WapLookupTargetCandidate | null {
+  const loweredCanonical = canonicalTarget.toLowerCase();
+  for (const candidate of candidates) {
+    if (candidate.canonicalTarget.toLowerCase() === loweredCanonical) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function mapTransportErrorToSendFailure(error: string): { code: WapSendFailureCode; error: string } {
+  if (/No connected WAP clients/i.test(error)) {
+    return {
+      code: "no_connected_client",
+      error,
+    };
+  }
+  return {
+    code: "send_failed",
+    error,
+  };
+}
+
+function mapSendStatusToFailure(candidate: WapLookupTargetCandidate): { code: WapSendFailureCode; error: string } | null {
+  switch (candidate.sendStatus) {
+    case "sendable":
+      return null;
+    case "not_friend":
+      return {
+        code: "not_friend",
+        error:
+          candidate.sendStatusReason ??
+          `Resolved WeChat target is not a friend of the connected account: ${candidate.canonicalTarget}`,
+      };
+    case "blocked_by_allow_from":
+      return {
+        code: "blocked_by_allow_from",
+        error:
+          candidate.sendStatusReason ??
+          `Resolved WeChat target is blocked by allowFrom: ${candidate.canonicalTarget}`,
+      };
+    case "invalid_group":
+      return {
+        code: "invalid_group",
+        error:
+          candidate.sendStatusReason ??
+          `Resolved WeChat group target is invalid or unavailable: ${candidate.canonicalTarget}`,
+      };
+    default:
+      return {
+        code: "send_failed",
+        error:
+          candidate.sendStatusReason ??
+          `Resolved WeChat target is not sendable: ${candidate.canonicalTarget}`,
+      };
+  }
+}
+
+function mapCommandFailure(
+  result: { ok: false; error: string; errorCode?: string },
+): { code: WapSendFailureCode; error: string } {
+  switch (result.errorCode) {
+    case "invalid_canonical_target":
+    case "target_not_found":
+    case "not_friend":
+    case "blocked_by_allow_from":
+    case "invalid_group":
+    case "no_connected_client":
+    case "rate_limited":
+    case "send_failed":
+      return {
+        code: result.errorCode,
+        error: result.error,
+      };
+    default:
+      return mapTransportErrorToSendFailure(result.error);
+  }
+}
+
+async function preflightCanonicalTarget(params: {
+  target: string;
+  accountId?: string | null;
+}): Promise<
+  | { ok: true; target: WapCanonicalTarget; candidate: WapLookupTargetCandidate }
+  | { ok: false; code: WapSendFailureCode; error: string }
+> {
+  const parsed = parseWapCanonicalTarget(params.target);
+  if (!parsed) {
+    return {
+      ok: false,
+      code: "invalid_canonical_target",
+      error: "Invalid WeChat target. Expected canonical target: <user:wxid> or <group:talker@chatroom>.",
+    };
+  }
+  const lookup = await lookupWapTargets({
+    query: parsed.canonicalTarget,
+    accountId: params.accountId,
+    kind: parsed.targetKind === "group" ? "group" : "user",
+    limit: 50,
+  });
+  if (!lookup.ok) {
+    const failure = mapTransportErrorToSendFailure(lookup.error);
+    return {
+      ok: false,
+      ...failure,
+    };
+  }
+  const candidate = findLookupCandidateByCanonicalTarget(lookup.candidates, parsed.canonicalTarget);
+  if (!candidate) {
+    return {
+      ok: false,
+      code: "target_not_found",
+      error: `WeChat target not found: ${parsed.canonicalTarget}`,
+    };
+  }
+  const sendabilityFailure = mapSendStatusToFailure(candidate);
+  if (sendabilityFailure) {
+    return {
+      ok: false,
+      ...sendabilityFailure,
+    };
+  }
+  return {
+    ok: true,
+    target: parsed,
+    candidate,
+  };
 }
 
 export async function listWapFriends(params: {
@@ -97,13 +325,14 @@ export async function listWapFriends(params: {
     const nickname = asString(entry.nickname);
     const alias = asString(entry.alias);
     const displayName = remark ?? nickname ?? alias ?? wxid;
+    const sendStatus = parseSendStatus(asString(entry.send_status) ?? asString(entry.sendStatus));
     friends.push({
       wxid,
       remark,
       nickname,
       alias,
       displayName,
-      sendable: entry.sendable === false ? false : true,
+      sendable: sendStatus === "sendable" || entry.sendable === true,
     });
   }
   return {
@@ -157,118 +386,107 @@ export async function listWapGroups(params: {
   };
 }
 
-export async function searchWapTarget(params: {
-  target: string;
+export async function lookupWapTargets(params: {
+  query: string;
   accountId?: string | null;
-}): Promise<{ ok: true; result: WapResolvedTarget } | { ok: false; error: string }> {
+  kind?: WapLookupKind | null;
+  limit?: number | null;
+}): Promise<{ ok: true; query: string; candidates: WapLookupTargetCandidate[] } | { ok: false; error: string }> {
   const accountId = normalizeAccountId(params.accountId);
-  const target = normalizeWapMessagingTarget(params.target);
-  if (!target) {
-    return { ok: false, error: "Missing WeChat target" };
+  const query = normalizeWapMessagingTarget(params.query);
+  if (!query) {
+    return { ok: false, error: "Missing WeChat lookup query" };
   }
+  const kind = params.kind === "user" || params.kind === "group" ? params.kind : "all";
   const rpcResult = await callClientRpc({
-    method: "search_target",
+    method: "lookup_targets",
     accountId,
-    rpcParams: { target },
+    rpcParams: {
+      query,
+      kind,
+      ...(typeof params.limit === "number" && Number.isFinite(params.limit) ? { limit: params.limit } : {}),
+    },
   });
-  if (rpcResult.ok) {
-    const record = asRecord(rpcResult.result);
-    const talker = asString(record?.talker) ?? asString(record?.resolved_talker);
-    const targetKindRaw = asString(record?.target_kind) ?? "unknown";
-    const targetKind = targetKindRaw === "group" ? "group" : targetKindRaw === "direct" ? "direct" : null;
-    if (talker && targetKind) {
-      return {
-        ok: true,
-        result: {
-          input: target,
-          talker,
-          targetKind,
-          canonicalTarget: decorateCanonicalTarget(talker),
-          displayName: asString(record?.display_name),
-          sendable: typeof record?.sendable === "boolean" ? record.sendable : undefined,
-        },
-      };
-    }
+  if (!rpcResult.ok) {
+    return rpcResult;
   }
-
-  const fallback = await resolveTargetViaClient({
-    target,
-    accountId,
-  });
-  if (!fallback.ok) {
-    return fallback;
-  }
-  const targetKind =
-    fallback.kind === "group" || fallback.talker.endsWith("@chatroom") ? "group" : "direct";
+  const record = asRecord(rpcResult.result);
+  const rawCandidates = Array.isArray(record?.candidates) ? record.candidates : [];
+  const candidates = rawCandidates
+    .map((entry) => parseLookupCandidate(entry))
+    .filter((entry): entry is WapLookupTargetCandidate => entry !== null);
+  const limit = params.limit ?? undefined;
   return {
     ok: true,
-    result: {
-      input: target,
-      talker: fallback.talker,
-      targetKind,
-      canonicalTarget: decorateCanonicalTarget(fallback.talker),
-    },
+    query,
+    candidates: limit && limit > 0 ? candidates.slice(0, limit) : candidates,
   };
 }
 
-export async function sendWapText(params: {
+export async function sendWapTextToCanonicalTarget(params: {
   target: string;
   content: string;
   accountId?: string | null;
+  replyToMessageId?: number | null;
 }): Promise<
   | {
       ok: true;
       accountId: string;
       talker: string;
       canonicalTarget: string;
-      targetKind: "direct" | "group";
-      displayName?: string;
+      targetKind: WapTargetKind;
+      displayName: string;
     }
-  | { ok: false; error: string }
+  | { ok: false; code: WapSendFailureCode; error: string }
 > {
   const accountId = normalizeAccountId(params.accountId);
   const content = params.content.trim();
   if (!content) {
-    return { ok: false, error: "Missing WeChat message content" };
+    return {
+      ok: false,
+      code: "send_failed",
+      error: "Missing WeChat message content",
+    };
   }
-  const resolved = await searchWapTarget({
+  const preflight = await preflightCanonicalTarget({
     target: params.target,
     accountId,
   });
-  if (!resolved.ok) {
-    return resolved;
-  }
-  if (resolved.result.sendable === false) {
-    return {
-      ok: false,
-      error: `Resolved target is currently not sendable: ${resolved.result.canonicalTarget}`,
-    };
+  if (!preflight.ok) {
+    return preflight;
   }
   const command: WapSendTextCommand = {
     type: "send_text",
     data: {
-      talker: resolved.result.talker,
+      talker: preflight.target.talker,
       content,
+      ...(params.replyToMessageId && params.replyToMessageId > 0 ? { reply_to_msg_id: params.replyToMessageId } : {}),
     },
   };
-  const sent = sendToClient(command, accountId);
-  if (!sent) {
-    return { ok: false, error: `No connected WAP clients for account ${accountId}` };
+  const result = await sendCommandToClient({
+    command,
+    accountId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapCommandFailure(result),
+    };
   }
   return {
     ok: true,
     accountId,
-    talker: resolved.result.talker,
-    canonicalTarget: resolved.result.canonicalTarget,
-    targetKind: resolved.result.targetKind,
-    displayName: resolved.result.displayName,
+    talker: preflight.target.talker,
+    canonicalTarget: preflight.target.canonicalTarget,
+    targetKind: preflight.target.targetKind,
+    displayName: preflight.candidate.displayName,
   };
 }
 
-export async function sendWapMedia(params: {
+export async function sendWapMediaToCanonicalTarget(params: {
   target: string;
   source: string;
-  kind: WapMediaToolKind;
+  kind: "image" | "file";
   accountId?: string | null;
   caption?: string | null;
   fileName?: string | null;
@@ -278,60 +496,63 @@ export async function sendWapMedia(params: {
       accountId: string;
       talker: string;
       canonicalTarget: string;
-      targetKind: "direct" | "group";
+      targetKind: WapTargetKind;
       commandType: "send_image" | "send_file";
-      displayName?: string;
+      displayName: string;
     }
-  | { ok: false; error: string }
+  | { ok: false; code: WapSendFailureCode; error: string }
 > {
   const accountId = normalizeAccountId(params.accountId);
   const source = params.source.trim();
   if (!source) {
-    return { ok: false, error: `Missing WeChat ${params.kind} source` };
+    return {
+      ok: false,
+      code: "send_failed",
+      error: `Missing WeChat ${params.kind} source`,
+    };
   }
-  const resolved = await searchWapTarget({
+  const preflight = await preflightCanonicalTarget({
     target: params.target,
     accountId,
   });
-  if (!resolved.ok) {
-    return resolved;
-  }
-  if (resolved.result.sendable === false) {
-    return {
-      ok: false,
-      error: `Resolved target is currently not sendable: ${resolved.result.canonicalTarget}`,
-    };
+  if (!preflight.ok) {
+    return preflight;
   }
   const command = await buildWapMediaCommand({
     source,
-    talker: resolved.result.talker,
+    talker: preflight.target.talker,
     accountId,
     caption: params.caption?.trim() || undefined,
     kind: params.kind,
     fileNameOverride: params.fileName?.trim() || undefined,
   });
-  if (!command) {
-    return { ok: false, error: `Failed to prepare WeChat ${params.kind} command from source: ${source}` };
+  if (!command || (command.type !== "send_image" && command.type !== "send_file")) {
+    return {
+      ok: false,
+      code: "send_failed",
+      error: `Failed to prepare WeChat ${params.kind} payload from source: ${source}`,
+    };
   }
-  if (params.kind === "image" && command.type !== "send_image") {
-    return { ok: false, error: `Prepared unexpected command type for image send: ${command.type}` };
-  }
-  if (params.kind === "file" && command.type !== "send_file") {
-    return { ok: false, error: `Prepared unexpected command type for file send: ${command.type}` };
-  }
-  const commandType = params.kind === "image" ? "send_image" : "send_file";
-  const sent = sendToClient(command, accountId);
-  if (!sent) {
-    return { ok: false, error: `No connected WAP clients for account ${accountId}` };
+  const result = await sendCommandToClient({
+    command: command.type === "send_image"
+      ? (command as WapSendImageCommand)
+      : (command as WapSendFileCommand),
+    accountId,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      ...mapCommandFailure(result),
+    };
   }
   return {
     ok: true,
     accountId,
-    talker: resolved.result.talker,
-    canonicalTarget: resolved.result.canonicalTarget,
-    targetKind: resolved.result.targetKind,
-    commandType,
-    displayName: resolved.result.displayName,
+    talker: preflight.target.talker,
+    canonicalTarget: preflight.target.canonicalTarget,
+    targetKind: preflight.target.targetKind,
+    commandType: command.type,
+    displayName: preflight.candidate.displayName,
   };
 }
 

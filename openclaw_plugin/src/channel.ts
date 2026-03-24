@@ -3,30 +3,43 @@ import {
   CHANNEL_ID,
   DEFAULT_ACCOUNT_ID,
   hasExplicitAccount,
-  resolveGroupAllowChats,
-  resolveGroupPolicy,
   listWapAccountIds,
   looksLikeWapTargetId,
   normalizeWapMessagingTarget,
   resolveAllowFrom,
+  resolveGroupAllowChats,
+  resolveGroupPolicy,
+  resolveWapAccount,
   resolveWapGroupRequireMention,
   resolveWapGroupSystemPrompt,
   resolveWapGroupToolPolicy,
   resolveWapOutboundTarget,
-  resolveWapAccount,
   type WapAccount,
   wapChannelConfigSchema,
 } from "./config.js";
+import { getClientCount, getClientStats, getWapRuntime } from "./ws-server.js";
 import {
-  buildWapMediaCommand,
-  getClientCount,
-  getClientStats,
-  getWapRuntime,
-  resolveTargetViaClient,
-  sendToClient,
-} from "./ws-server.js";
-import { buildWapClientDiagnostics, listWapFriends, listWapGroups, searchWapTarget } from "./operations.js";
+  buildWapClientDiagnostics,
+  listWapFriends,
+  listWapGroups,
+  lookupWapTargets,
+  sendWapMediaToCanonicalTarget,
+  sendWapTextToCanonicalTarget,
+  type WapLookupKind,
+} from "./operations.js";
 import { resolveReplyMediaUrls } from "./reply-media.js";
+
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  details?: unknown;
+};
+
+function jsonResult(details: unknown): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+    details,
+  };
+}
 
 function getAccountClientCount(accountId: string): number {
   return getClientStats().filter((client) => client.accountId === accountId).length;
@@ -48,37 +61,213 @@ function buildPairingApproveHint(): string {
   return `Approve via: openclaw pairing list ${CHANNEL_ID} / openclaw pairing approve ${CHANNEL_ID} <code>`;
 }
 
-function parseSendTarget(raw: string): { target: string; kind: "direct" | "group" } | null {
-  const normalized = normalizeWapMessagingTarget(raw);
-  if (!normalized) {
-    return null;
-  }
-  const prefixed = normalized.match(/^(user|direct|friend|group):(.+)$/i);
-  if (!prefixed) {
-    return null;
-  }
-  const body = prefixed[2]?.trim() ?? "";
-  if (!body) {
-    return null;
-  }
-  const prefix = prefixed[1].toLowerCase();
-  if (prefix === "group") {
-    if (!body.endsWith("@chatroom")) {
-      return null;
-    }
-    return { target: body, kind: "group" };
-  }
-  return { target: body, kind: "direct" };
-}
-
-function decorateCanonicalTarget(target: string): string {
-  return target.endsWith("@chatroom") ? `group:${target}` : `user:${target}`;
-}
-
 function describeWapMessageTool() {
   return {
-    actions: ["search"],
+    actions: ["search", "send"],
   };
+}
+
+function normalizeOptionalString(value: unknown, allowEmpty = false): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed && !allowEmpty) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function normalizeLookupKind(value: unknown): WapLookupKind {
+  return value === "user" || value === "group" ? value : "all";
+}
+
+function resolveReplyToMessageId(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.trunc(parsed);
+    }
+  }
+  return undefined;
+}
+
+function looksLikeImageSource(raw: string, fileName?: string): boolean {
+  const source = (fileName ?? raw).split("#", 1)[0]?.split("?", 1)[0] ?? fileName ?? raw;
+  return /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i.test(source);
+}
+
+async function executeCanonicalWapSend(params: {
+  to: string;
+  text?: string;
+  mediaUrl?: string;
+  fileName?: string;
+  accountId?: string | null;
+  replyToMessageId?: number;
+}): Promise<{ ok: true; details: unknown } | { ok: false; error: string; code?: string }> {
+  const target = normalizeWapMessagingTarget(params.to);
+  if (!target) {
+    return {
+      ok: false,
+      error: "Missing WeChat target. Provide canonical target: <user:wxid> or <group:talker@chatroom>.",
+      code: "invalid_canonical_target",
+    };
+  }
+  const accountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
+  const text = params.text?.trim() ?? "";
+  const mediaUrl = params.mediaUrl?.trim() ?? "";
+  let lastSuccess: unknown = {
+    ok: true,
+    target,
+  };
+
+  if (text && mediaUrl) {
+    const textResult = await sendWapTextToCanonicalTarget({
+      target,
+      content: text,
+      accountId,
+      replyToMessageId: params.replyToMessageId,
+    });
+    if (!textResult.ok) {
+      return {
+        ok: false,
+        error: textResult.error,
+        code: textResult.code,
+      };
+    }
+    lastSuccess = textResult;
+  }
+
+  if (mediaUrl) {
+    const mediaResult = await sendWapMediaToCanonicalTarget({
+      target,
+      source: mediaUrl,
+      kind: looksLikeImageSource(mediaUrl, params.fileName) ? "image" : "file",
+      accountId,
+      fileName: params.fileName,
+    });
+    if (!mediaResult.ok) {
+      return {
+        ok: false,
+        error: mediaResult.error,
+        code: mediaResult.code,
+      };
+    }
+    return {
+      ok: true,
+      details: {
+        ...mediaResult,
+        ...(text ? { precedingTextSent: true } : {}),
+      },
+    };
+  }
+
+  if (text) {
+    const textResult = await sendWapTextToCanonicalTarget({
+      target,
+      content: text,
+      accountId,
+      replyToMessageId: params.replyToMessageId,
+    });
+    if (!textResult.ok) {
+      return {
+        ok: false,
+        error: textResult.error,
+        code: textResult.code,
+      };
+    }
+    return {
+      ok: true,
+      details: textResult,
+    };
+  }
+
+  return {
+    ok: true,
+    details: lastSuccess,
+  };
+}
+
+function extractActionSendTarget(args: Record<string, unknown>) {
+  const action = typeof args.action === "string" ? args.action.trim() : "";
+  if (action !== "sendMessage") {
+    return null;
+  }
+  const to = normalizeOptionalString(args.to);
+  if (!to) {
+    return null;
+  }
+  const accountId = normalizeOptionalString(args.accountId);
+  return accountId ? { to, accountId } : { to };
+}
+
+async function handleWapSearchAction(params: {
+  params: Record<string, unknown>;
+  accountId?: string | null;
+}) {
+  const query =
+    normalizeOptionalString(params.params.query) ??
+    normalizeOptionalString(params.params.target) ??
+    normalizeOptionalString(params.params.to);
+  if (!query) {
+    throw new Error("WAP search requires query/target");
+  }
+  const limitRaw = params.params.limit;
+  const limit = typeof limitRaw === "number" && Number.isFinite(limitRaw) ? limitRaw : undefined;
+  const result = await lookupWapTargets({
+    query,
+    accountId: params.accountId,
+    kind: normalizeLookupKind(params.params.kind),
+    limit,
+  });
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  return jsonResult({
+    ok: true,
+    query,
+    candidates: result.candidates,
+  });
+}
+
+async function handleWapSendAction(params: {
+  params: Record<string, unknown>;
+  accountId?: string | null;
+}) {
+  const to = normalizeOptionalString(params.params.to);
+  const text =
+    normalizeOptionalString(params.params.message, true) ??
+    normalizeOptionalString(params.params.text, true) ??
+    "";
+  const mediaUrl =
+    normalizeOptionalString(params.params.media) ??
+    normalizeOptionalString(params.params.path) ??
+    normalizeOptionalString(params.params.filePath) ??
+    normalizeOptionalString(params.params.url);
+  const fileName =
+    normalizeOptionalString(params.params.fileName) ??
+    normalizeOptionalString(params.params.name);
+  if (!to) {
+    throw new Error("WAP send requires `to` canonical target");
+  }
+  if (!text.trim() && !mediaUrl) {
+    throw new Error("WAP send requires at least one of: message/text or media/path/url");
+  }
+  const result = await executeCanonicalWapSend({
+    to,
+    text,
+    mediaUrl,
+    fileName,
+    accountId: params.accountId,
+    replyToMessageId: resolveReplyToMessageId(params.params.replyTo ?? params.params.replyToMessageId),
+  });
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  return jsonResult(result.details);
 }
 
 export const wapPlugin: ChannelPlugin<WapAccount> = {
@@ -105,10 +294,10 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
   },
   agentPrompt: {
     messageToolHints: () => [
-      "- Use `wechat_search_target` to resolve ambiguous WeChat recipients before sending.",
-      "- Use `wechat_get_friends` and `wechat_get_groups` when you need proactive WeChat discovery.",
-      "- Use `wechat_send_text` for active WeChat outreach outside the current reply flow.",
-      "- Use `wechat_send_image` and `wechat_send_file` for proactive media delivery; they support remote URLs and local host paths.",
+      "- Use `wechat_lookup_targets` when you need candidate WeChat recipients before sending.",
+      "- Use `wechat_get_friends` and `wechat_get_groups` only for explicit directory inspection.",
+      "- Use message action `send` / tool action `sendMessage` with canonical targets only: `user:wxid` or `group:talker@chatroom`.",
+      "- WAP no longer supports sending with nickname/remark targets. Resolve candidates first, then send with canonical target.",
     ],
   },
   reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
@@ -188,7 +377,7 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
     normalizeTarget: normalizeWapMessagingTarget,
     targetResolver: {
       looksLikeId: looksLikeWapTargetId,
-      hint: "<user:direct_id|group:group_id@chatroom>",
+      hint: "<user:wxid|group:talker@chatroom>",
     },
   },
   directory: {
@@ -226,64 +415,24 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
   },
   actions: {
     describeMessageTool: () => describeWapMessageTool(),
-    supportsAction: ({ action }) => action === "search",
+    supportsAction: ({ action }) => action === "search" || action === "send",
+    extractToolSend: ({ args }) => extractActionSendTarget(args),
     handleAction: async ({ action, params, accountId }) => {
       const runtime = getWapRuntime();
-      runtime?.logger.debug(
-        `WAP action called action=${action} account=${accountId ?? DEFAULT_ACCOUNT_ID}`,
-      );
-      if (action !== "search") {
-        throw new Error(`WAP action not supported: ${action}`);
+      runtime?.logger.debug(`WAP action called action=${action} account=${accountId ?? DEFAULT_ACCOUNT_ID}`);
+      if (action === "search") {
+        return await handleWapSearchAction({
+          params,
+          accountId,
+        });
       }
-      const queryRaw =
-        (typeof params.query === "string" ? params.query : "") ||
-        (typeof params.target === "string" ? params.target : "") ||
-        (typeof params.to === "string" ? params.to : "");
-      const query = normalizeWapMessagingTarget(queryRaw);
-      if (!query) {
-        runtime?.logger.debug("WAP search aborted: empty query");
-        throw new Error("WAP search requires query/target");
+      if (action === "send") {
+        return await handleWapSendAction({
+          params,
+          accountId,
+        });
       }
-      const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
-      runtime?.logger.debug(
-        `WAP search start account=${effectiveAccountId} query=${query}`,
-      );
-      const resolved = await searchWapTarget({
-        target: query,
-        accountId: effectiveAccountId,
-      });
-      if (!resolved.ok) {
-        runtime?.logger.debug(
-          `WAP search failed account=${effectiveAccountId} query=${query} error=${resolved.error}`,
-        );
-        throw new Error(resolved.error);
-      }
-      const kind = resolved.result.targetKind;
-      const canonicalTarget = resolved.result.canonicalTarget;
-      runtime?.logger.debug(
-        `WAP search ok account=${effectiveAccountId} query=${query} canonical=${canonicalTarget} kind=${kind}`,
-      );
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                ok: true,
-                input: queryRaw,
-                canonicalTarget,
-                targetKind: kind,
-                talker: resolved.result.talker,
-                displayName: resolved.result.displayName,
-                sendable: resolved.result.sendable,
-                usage: "Use canonicalTarget as message target",
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      } as unknown;
+      throw new Error(`WAP action not supported: ${action}`);
     },
   },
   outbound: {
@@ -295,199 +444,71 @@ export const wapPlugin: ChannelPlugin<WapAccount> = {
         allowFrom,
         mode,
       }),
-    sendPayload: async ({ cfg, to, payload, accountId }) => {
+    sendPayload: async ({ to, payload, accountId, replyToId }) => {
       const payloadText = typeof payload?.text === "string" ? payload.text : "";
       const mediaList = resolveReplyMediaUrls(payload);
       if (!payloadText && mediaList.length === 0) {
         return { ok: true, channel: CHANNEL_ID };
       }
-
-      if (mediaList.length > 0) {
-        const sendMedia = wapPlugin.outbound?.sendMedia;
-        if (!sendMedia) {
-          return {
-            ok: false,
-            error: "WAP sendMedia is unavailable",
-            channel: CHANNEL_ID,
-          };
-        }
-        let lastResult = await sendMedia({
-          cfg,
+      let lastResult: { ok: true; details: unknown } | { ok: false; error: string; code?: string } = {
+        ok: true,
+        details: { ok: true },
+      };
+      if (mediaList.length === 0) {
+        lastResult = await executeCanonicalWapSend({
+          to,
+          text: payloadText,
+          accountId,
+          replyToMessageId: resolveReplyToMessageId(replyToId),
+        });
+      } else {
+        lastResult = await executeCanonicalWapSend({
           to,
           text: payloadText,
           mediaUrl: mediaList[0],
           accountId,
+          replyToMessageId: resolveReplyToMessageId(replyToId),
         });
-        for (let i = 1; i < mediaList.length; i += 1) {
-          lastResult = await sendMedia({
-            cfg,
+        for (let i = 1; i < mediaList.length && lastResult.ok; i += 1) {
+          lastResult = await executeCanonicalWapSend({
             to,
-            text: "",
             mediaUrl: mediaList[i],
             accountId,
           });
         }
-        return lastResult;
       }
-
-      const sendText = wapPlugin.outbound?.sendText;
-      if (!sendText) {
-        return {
-          ok: false,
-          error: "WAP sendText is unavailable",
-          channel: CHANNEL_ID,
-        };
-      }
-      return sendText({
-        cfg,
-        to,
-        text: payloadText,
-        accountId,
-      });
+      return lastResult.ok
+        ? { ok: true, channel: CHANNEL_ID, details: lastResult.details }
+        : { ok: false, channel: CHANNEL_ID, error: lastResult.error, code: lastResult.code };
     },
-    sendText: async ({ to, text, accountId }) => {
-      const runtime = getWapRuntime();
-      const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
-      const parsedTarget = parseSendTarget(to);
-      if (!parsedTarget) {
-        runtime?.logger.warn(
-          `WAP sendText rejected non-typed target account=${effectiveAccountId} target=${to}`,
-        );
-        return {
-          ok: false,
-          error: "Missing/invalid WeChat target. Provide <user:direct_id|group:group_id@chatroom>.",
-          channel: CHANNEL_ID,
-        };
-      }
-      const resolvedTarget = await resolveTargetViaClient({
-        target: parsedTarget.target,
-        accountId: effectiveAccountId,
+    sendText: async ({ to, text, accountId, replyToId }) => {
+      const result = await executeCanonicalWapSend({
+        to,
+        text,
+        accountId,
+        replyToMessageId: resolveReplyToMessageId(replyToId),
       });
-      if (!resolvedTarget.ok) {
-        runtime?.logger.warn(
-          `WAP sendText target resolve failed account=${effectiveAccountId} target=${parsedTarget.target}: ${resolvedTarget.error}`,
-        );
-        return {
-          ok: false,
-          error: resolvedTarget.error,
-          channel: CHANNEL_ID,
-        };
-      }
-      const resolvedKind =
-        resolvedTarget.kind === "group" || resolvedTarget.talker.endsWith("@chatroom")
-          ? "group"
-          : "direct";
-      if (
-        resolvedTarget.talker.toLowerCase() !== parsedTarget.target.toLowerCase() ||
-        resolvedKind !== parsedTarget.kind
-      ) {
-        const canonicalTarget = decorateCanonicalTarget(resolvedTarget.talker);
-        return {
-          ok: false,
-          error: `Target "${to}" is not canonical. Use message action=search and resend with canonicalTarget "${canonicalTarget}".`,
-          channel: CHANNEL_ID,
-        };
-      }
-      const sent = sendToClient(
-        {
-          type: "send_text",
-          data: { talker: resolvedTarget.talker, content: text },
-        },
-        effectiveAccountId,
-      );
-      if (!sent) {
-        runtime?.logger.warn(
-          `WAP sendText failed: no connected clients for account ${effectiveAccountId}`,
-        );
-        return {
-          ok: false,
-          error: "No connected WAP clients",
-          channel: CHANNEL_ID,
-        };
-      }
-      runtime?.logger.debug(
-        `WAP sendText to ${resolvedTarget.talker} (from ${to}): ${text.substring(0, 50)}...`,
-      );
-      return { ok: true, channel: CHANNEL_ID };
+      return result.ok
+        ? { ok: true, channel: CHANNEL_ID, details: result.details }
+        : { ok: false, channel: CHANNEL_ID, error: result.error, code: result.code };
     },
     sendMedia: async ({ to, text, mediaUrl, accountId }) => {
-      const runtime = getWapRuntime();
       if (!mediaUrl) {
         return {
           ok: false,
+          channel: CHANNEL_ID,
           error: "mediaUrl is required",
-          channel: CHANNEL_ID,
         };
       }
-      const effectiveAccountId = accountId ?? DEFAULT_ACCOUNT_ID;
-      const parsedTarget = parseSendTarget(to);
-      if (!parsedTarget) {
-        runtime?.logger.warn(
-          `WAP sendMedia rejected non-typed target account=${effectiveAccountId} target=${to}`,
-        );
-        return {
-          ok: false,
-          error: "Missing/invalid WeChat target. Provide <user:direct_id|group:group_id@chatroom>.",
-          channel: CHANNEL_ID,
-        };
-      }
-      const resolvedTarget = await resolveTargetViaClient({
-        target: parsedTarget.target,
-        accountId: effectiveAccountId,
+      const result = await executeCanonicalWapSend({
+        to,
+        text,
+        mediaUrl,
+        accountId,
       });
-      if (!resolvedTarget.ok) {
-        runtime?.logger.warn(
-          `WAP sendMedia target resolve failed account=${effectiveAccountId} target=${parsedTarget.target}: ${resolvedTarget.error}`,
-        );
-        return {
-          ok: false,
-          error: resolvedTarget.error,
-          channel: CHANNEL_ID,
-        };
-      }
-      const resolvedKind =
-        resolvedTarget.kind === "group" || resolvedTarget.talker.endsWith("@chatroom")
-          ? "group"
-          : "direct";
-      if (
-        resolvedTarget.talker.toLowerCase() !== parsedTarget.target.toLowerCase() ||
-        resolvedKind !== parsedTarget.kind
-      ) {
-        const canonicalTarget = decorateCanonicalTarget(resolvedTarget.talker);
-        return {
-          ok: false,
-          error: `Target "${to}" is not canonical. Use message action=search and resend with canonicalTarget "${canonicalTarget}".`,
-          channel: CHANNEL_ID,
-        };
-      }
-      const command = await buildWapMediaCommand({
-        source: mediaUrl,
-        talker: resolvedTarget.talker,
-        accountId: effectiveAccountId,
-        caption: text || undefined,
-      });
-      if (!command) {
-        return {
-          ok: false,
-          error: "WAP media sync failed (invalid URL or local file path unavailable)",
-          channel: CHANNEL_ID,
-        };
-      }
-      const sent = sendToClient(command, effectiveAccountId);
-      if (!sent) {
-        runtime?.logger.warn(
-          `WAP sendMedia failed: no connected clients for account ${effectiveAccountId}`,
-        );
-        return {
-          ok: false,
-          error: "No connected WAP clients",
-          channel: CHANNEL_ID,
-        };
-      }
-      runtime?.logger.debug(
-        `WAP sendMedia to ${resolvedTarget.talker} (from ${to}): ${mediaUrl}`,
-      );
-      return { ok: true, channel: CHANNEL_ID };
+      return result.ok
+        ? { ok: true, channel: CHANNEL_ID, details: result.details }
+        : { ok: false, channel: CHANNEL_ID, error: result.error, code: result.code };
     },
   },
   status: {

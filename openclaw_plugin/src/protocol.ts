@@ -53,18 +53,6 @@ export interface WapCapabilitiesPayload {
   data: WapClientCapabilities;
 }
 
-export interface WapResolveTargetResultPayload {
-  type: "resolve_target_result";
-  data: {
-    request_id: string;
-    target: string;
-    ok: boolean;
-    resolved_talker?: string;
-    target_kind?: "direct" | "group" | "unknown";
-    error?: string;
-  };
-}
-
 export interface WapRpcResultPayload {
   type: "rpc_result";
   data: {
@@ -76,12 +64,24 @@ export interface WapRpcResultPayload {
   };
 }
 
+export interface WapCommandResultPayload {
+  type: "command_result";
+  data: {
+    request_id: string;
+    command_type: "send_text" | "send_image" | "send_file" | "send_voice";
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+    error_code?: string;
+  };
+}
+
 export type WapUpstreamMessage =
   | WapMessagePayload
   | WapHeartbeatPayload
   | WapCapabilitiesPayload
-  | WapResolveTargetResultPayload
-  | WapRpcResultPayload;
+  | WapRpcResultPayload
+  | WapCommandResultPayload;
 
 // ============================================================
 // Downstream commands (Server -> Android)
@@ -90,6 +90,7 @@ export type WapUpstreamMessage =
 export interface WapSendTextCommand {
   type: "send_text";
   data: {
+    request_id?: string;
     talker: string;
     content: string;
     reply_to_msg_id?: number;
@@ -98,14 +99,6 @@ export interface WapSendTextCommand {
 
 export interface WapPongCommand {
   type: "pong";
-}
-
-export interface WapResolveTargetCommand {
-  type: "resolve_target";
-  data: {
-    request_id: string;
-    target: string;
-  };
 }
 
 export interface WapRpcRequestCommand {
@@ -143,6 +136,7 @@ export interface WapConfigCommand {
 export interface WapSendImageCommand {
   type: "send_image";
   data: {
+    request_id?: string;
     talker: string;
     image_url?: string;
     image_id?: string;
@@ -154,6 +148,7 @@ export interface WapSendImageCommand {
 export interface WapSendFileCommand {
   type: "send_file";
   data: {
+    request_id?: string;
     talker: string;
     file_url?: string;
     file_id?: string;
@@ -166,6 +161,7 @@ export interface WapSendFileCommand {
 export interface WapSendVoiceCommand {
   type: "send_voice";
   data: {
+    request_id?: string;
     talker: string;
     voice_url: string;
     duration: number;
@@ -175,7 +171,6 @@ export interface WapSendVoiceCommand {
 export type WapDownstreamCommand =
   | WapSendTextCommand
   | WapPongCommand
-  | WapResolveTargetCommand
   | WapRpcRequestCommand
   | WapConfigCommand
   | WapSendImageCommand

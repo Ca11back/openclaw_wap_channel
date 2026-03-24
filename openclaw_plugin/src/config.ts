@@ -384,12 +384,54 @@ function stripWapExplicitPrefix(target: string): string {
   return prefixed[2]?.trim() ?? "";
 }
 
+export function decorateWapCanonicalTarget(target: string): string {
+  return isCanonicalGroupTarget(target) ? `group:${target}` : `user:${target}`;
+}
+
+export function parseWapCanonicalTarget(raw: string): {
+  canonicalTarget: string;
+  talker: string;
+  targetKind: "direct" | "group";
+} | null {
+  const normalized = normalizeWapMessagingTarget(raw);
+  if (!normalized) {
+    return null;
+  }
+  const prefixed = normalized.match(/^(user|direct|friend|group):(.+)$/i);
+  if (!prefixed) {
+    return null;
+  }
+  const prefix = prefixed[1]?.toLowerCase() ?? "";
+  const talker = prefixed[2]?.trim() ?? "";
+  if (!talker) {
+    return null;
+  }
+  if (prefix === "group") {
+    if (!isCanonicalGroupTarget(talker)) {
+      return null;
+    }
+    return {
+      canonicalTarget: `group:${talker}`,
+      talker,
+      targetKind: "group",
+    };
+  }
+  if (!isCanonicalDirectTarget(talker) || isCanonicalGroupTarget(talker)) {
+    return null;
+  }
+  return {
+    canonicalTarget: `user:${talker}`,
+    talker,
+    targetKind: "direct",
+  };
+}
+
 export function looksLikeWapTargetId(raw: string): boolean {
   const normalized = normalizeWapMessagingTarget(raw);
   if (!normalized) {
     return false;
   }
-  return isCanonicalWapTarget(stripWapExplicitPrefix(normalized));
+  return Boolean(parseWapCanonicalTarget(normalized)) || isCanonicalWapTarget(stripWapExplicitPrefix(normalized));
 }
 
 function isCanonicalDirectTarget(target: string): boolean {
@@ -412,8 +454,11 @@ export function resolveWapOutboundTarget(params: {
   const mode = params.mode ?? "explicit";
   const explicitTarget = params.to ? normalizeWapMessagingTarget(params.to) : "";
   if (explicitTarget) {
-    const prefixed = /^(user|direct|friend|group):/i.test(explicitTarget);
-    if (mode === "explicit" && !prefixed) {
+    const parsedExplicitTarget = parseWapCanonicalTarget(explicitTarget);
+    if (parsedExplicitTarget) {
+      return { ok: true, to: parsedExplicitTarget.canonicalTarget };
+    }
+    if (mode === "explicit") {
       return {
         ok: false,
         error: new Error(
@@ -421,17 +466,15 @@ export function resolveWapOutboundTarget(params: {
         ),
       };
     }
-    const canonicalTarget = stripWapExplicitPrefix(explicitTarget);
-    if (!isCanonicalWapTarget(canonicalTarget)) {
-      return {
-        ok: false,
-        error: new Error(
-          "Invalid WeChat target. Send only supports canonical id: <user:direct_id> or <group:group_id@chatroom>. Use message action=search first.",
-        ),
-      };
+    if (isCanonicalWapTarget(explicitTarget)) {
+      return { ok: true, to: decorateWapCanonicalTarget(explicitTarget) };
     }
-    // Keep typed target (user:/group:) for downstream routing in core.
-    return { ok: true, to: explicitTarget };
+    return {
+      ok: false,
+      error: new Error(
+        "Invalid WeChat target. Send only supports canonical id: <user:direct_id> or <group:group_id@chatroom>.",
+      ),
+    };
   }
 
   const normalizedAllowFrom = (params.allowFrom ?? [])
@@ -439,7 +482,7 @@ export function resolveWapOutboundTarget(params: {
     .filter((entry): entry is string => isCanonicalWapTarget(entry));
   const fallbackTarget = normalizedAllowFrom[0];
   if (mode !== "explicit" && fallbackTarget) {
-    return { ok: true, to: fallbackTarget };
+    return { ok: true, to: decorateWapCanonicalTarget(fallbackTarget) };
   }
 
   return {
